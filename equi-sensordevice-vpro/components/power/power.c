@@ -131,9 +131,14 @@ static void __attribute__((noreturn)) charge_only_sleep(void)
         c = chg_update(&trk, now_ms());
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    /* Device is "off": D1 dark, D2 shows the charge state (latched through deep sleep). */
-    status_led_set_mode(LED_IDX_STATUS, LED_MODE_OFF, LED_OFF);
+    /*
+     * Device is "off": D1 dark, D2 shows the charge state (latched through deep sleep).
+     * Order matters: after a deep-sleep wake both modes start OFF while the LEDs still
+     * show the latched colour, so set D2 first - the first frame written is then the
+     * final one and the LED never flickers on each 10 s wake.
+     */
     status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, charge_colour(c));
+    status_led_set_mode(LED_IDX_STATUS, LED_MODE_OFF, LED_OFF);
     status_led_override_clear();
     ESP_LOGI(TAG, "Charge-only: %s, sleeping %d s (button wakes)", charge_name(c), POWER_CHARGE_POLL_S);
 
