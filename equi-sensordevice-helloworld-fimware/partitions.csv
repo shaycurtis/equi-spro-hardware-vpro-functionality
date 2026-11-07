@@ -1,0 +1,9 @@
+# ESP-IDF Partition Table
+# Name,       Type,  SubType, Offset,   Size,     Flags
+# partitions, table, ,        0x10000,  0x1000,   DUMMY -- COMMENT OUT
+  nvs,        data,  nvs,     0x11000,  0x4000,   
+  phy_init,   data,  phy,     0x16000,  0x1000,
+  factory,    app,   factory, 0x20000,  3M,
+  otadata,    data,  ota,     ,         0x2000,
+  ota_0,      app,   ota_0,   ,         3M,
+  ota_1,      app,   ota_1,   ,         3M,
