@@ -16,22 +16,24 @@ Then open http://localhost:8080.
 | `--summary N` | Print reception stats every N s (adverts per burst, RSSI, missed readings). |
 | `--verbose` | Print every advert, not just one line per reading. |
 | `--duration N` | Stop after N seconds. |
+| `--battery-mah N` | Battery capacity for the drain/runtime estimate (default 1500). |
 
 Requirements: Python 3.10+, `pip install -r requirements.txt` (bleak, pyserial). The
 dashboard loads Chart.js from cdn.jsdelivr.net, so the browser needs internet access.
 
-Dashboard: device cards (battery, temp/RH, steps, charge, RSSI, HorseID), a **Sessions** strip
+Dashboard: device cards (battery, temp/RH, steps, heart rate, charge, HorseID, **battery drain
+estimate** in mA and runtime), a **Sessions** strip
 (click one to see only that session; 1h/6h/24h/7d show all data by time), charts, and an
 **ECG on demand** panel (needs `--serial`; the device is contacted at its next advert, up to 30 s).
 
 Files:
-- `equi_protocol.py`: advert decoder (telemetry v1/v2 + identity), mirrors `components/telemetry/include/telemetry.h`.
+- `equi_protocol.py`: advert decoder (telemetry v1-v4 + identity), mirrors `components/telemetry/include/telemetry.h`.
 - `gateway.py`: receiver loop, de-duplication, SQLite, sessions, automatic device time sync.
 - `ecg_manager.py`: on-demand ECG via the receiver (request, reassembly, storage).
 - `webapp.py`: JSON API + `static/index.html`.
 
 SQLite tables (`data/telemetry.db`, git-ignored): `readings` (one row per 30 s advert, with
-`device_session` and `horse_id`), `device_sessions` (session ID, HorseID, start, last seen),
+`device_session`, `horse_id`, `heart_rate`), `device_sessions` (session ID, HorseID, start, last seen),
 `ecg_captures` (int16 samples, rate, uV/LSB, session, horse).
 
 API: `GET /api/devices`, `/api/sessions?device=`, `/api/readings?device=&hours=|session=`,

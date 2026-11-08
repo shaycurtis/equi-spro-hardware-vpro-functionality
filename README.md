@@ -1,7 +1,7 @@
 # Equimetrics VPro firmware (SPRO PCBA)
 
 Custom firmware for the Equimetrics SPRO sensor board (ESP32-S3-WROOM-1-N16R8), a horse-worn
-chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-08**.
+chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-08, ~04:00** (end of day 1).
 
 > **Signing keys never leave this PC.** `**/private/` and `*.pem` are git-ignored. All
 > building and signing is local.
@@ -40,8 +40,8 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 ## Device behaviour (user view)
 
 1. **Power on:** hold the power button ~1.5 s. Green double flash, then **both LEDs blink green**: scan the horse's tag.
-2. **Tag read** (or 2 min timeout): D1 breathes blue, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
-3. **Running:** every 30 s, sample sensors and send a BLE advert burst.
+2. **Tag read** (or 2 min timeout): D1 gives a short blue blink every 5 s, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
+3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
 4. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (D2 red = charging, green = full).
 
 ## Build and flash (device firmware)
@@ -81,7 +81,7 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Protocols (source of truth in code)
 
-- **Telemetry advert v2 + identity scan response:** `equi-sensordevice-vpro/components/telemetry/include/telemetry.h`
+- **Telemetry advert v4 + identity scan response:** `equi-sensordevice-vpro/components/telemetry/include/telemetry.h`
   (decoder: `gateway/equi_protocol.py`). Company ID `0xFFFF` is a **test ID**, so get an Equimetrics SIG ID for production.
 - **ECG GATT service:** `equi-sensordevice-vpro/components/telemetry/ecg_service.h` (start/stop/set-time, 112-sample notifications).
 - **Receiver serial lines:** top of `gateway-receiver/main/receiver_main.c` (`EQADV`, `EQECG*`, `ECG,...` command).
@@ -109,6 +109,19 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
   if it recurs.
 - **Gateway DB**: readings are not unique by (seq, uptime); de-dup is in memory per burst. Session
   losses are only counted within one gateway run + one device session.
+
+## Where we left off (overnight test, 2026-11-08)
+
+- Device flashed with commit `4d51a5e` (light sleep, 5 s heartbeat, heart rate in advert v4).
+- The user is wearing it overnight **on battery**, with their own gateway running
+  (`python gateway\gateway.py --serial COM4 --web`); nothing of ours holds COM3/COM4.
+- **First thing to check:** the device card at http://localhost:8080. The "Battery drain"
+  line (fuel-gauge fit over the session, 1500 mAh) and the heart-rate chart for the night.
+  The same numbers come from `webapp.drain_estimate()` and the `readings` table
+  (`usb = 0`, `heart_rate`). Estimate before measuring: about 3-6 mA plus under 0.5 mA for heart rate.
+- If the drain is much higher than expected, the first suspect is the main crystal kept on in light
+  sleep for BLE (`CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP`). Others: wake rate (power task
+  250 ms, scan button 100 ms, heart-rate poll 250 ms), WS2812 standby current.
 
 ## Next steps
 
