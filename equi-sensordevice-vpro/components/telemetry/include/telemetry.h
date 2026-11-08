@@ -78,3 +78,12 @@ esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint6
 
 /* Stop advertising (shutdown). */
 void telemetry_ble_stop(void);
+
+/* True if a gateway sent a scan request for one of our adverts within max_age_ms. The
+ * receipt only works with gateways that scan actively (most commercial gateways can; the
+ * advert itself is plain legacy ADV_IND, so passive gateways still get all the data). Counts
+ * public / static-random scanners only (phones use rotating private addresses). */
+bool telemetry_gateway_seen(uint32_t max_age_ms);
+
+/* Total gateway scan requests since boot (for logging). */
+uint32_t telemetry_scan_requests(void);

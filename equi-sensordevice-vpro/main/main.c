@@ -120,9 +120,20 @@ static void publish_identity(void)
     telemetry_ble_set_identity(s_dev_id, s_session, s_horse);
 }
 
+/* A gateway counts as "connected" while it answered (scan request) within this window:
+ * the last burst plus one missed one, so a single lost burst does not flip the LED. */
+#define GATEWAY_SEEN_MS   ((SAMPLE_PERIOD_S * 2 + 5) * 1000)
+
+static bool s_linked;
+
+static led_colour_t heartbeat_colour(void)
+{
+    return telemetry_gateway_seen(GATEWAY_SEEN_MS) ? LED_LINKED : LED_RUNNING;
+}
+
 static void show_running_leds(void)
 {
-    status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE, LED_RUNNING);   /* 5 s heartbeat */
+    status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE, heartbeat_colour());   /* 5 s heartbeat */
     status_led_set_mode(LED_IDX_CHARGE, LED_MODE_OFF, LED_OFF);
     power_set_charge_led(true);          /* D2 back to the charge state (off unless on USB) */
 }
@@ -230,6 +241,19 @@ static void sample_task(void *arg)
             ESP_LOGW(TAG, "advert seq %u failed: %s", seq, esp_err_to_name(err));
         }
         seq++;
+
+        /* After the burst: green heartbeat if a gateway answered, blue if not. */
+        uint32_t reqs0 = telemetry_scan_requests();
+        vTaskDelay(pdMS_TO_TICKS(ADV_BURST_MS + 100));
+        bool linked = telemetry_gateway_seen(GATEWAY_SEEN_MS);
+        if (linked != s_linked) {
+            s_linked = linked;
+            ESP_LOGI(TAG, "gateway %s", linked ? "connected (scan requests received)" : "lost");
+        }
+        ESP_LOGI(TAG, "%lu gateway scan requests in the burst", (unsigned long)(telemetry_scan_requests() - reqs0));
+        if (!s_scanning) {
+            status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE, heartbeat_colour());
+        }
 
         next_us += (int64_t)SAMPLE_PERIOD_S * 1000000;
         for (int64_t left; (left = next_us - esp_timer_get_time()) > 0;) {

@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
@@ -16,6 +17,11 @@ static char s_name[24];
 static uint8_t s_rsp[31];
 static size_t s_rsp_len;
 static volatile bool s_synced;
+static bool s_adv_configured;
+static volatile int64_t s_gw_seen_us = -1;   /* last scan request from a gateway */
+static volatile uint32_t s_scan_reqs;
+
+#define ADV_INSTANCE 0
 
 /* ------------------------------------------------------------------ encode */
 
@@ -64,6 +70,14 @@ static void host_task(void *arg)
     nimble_port_freertos_deinit();
 }
 
+static bool is_gateway_addr(const ble_addr_t *a)
+{
+    if (a->type == BLE_ADDR_PUBLIC || a->type == BLE_ADDR_PUBLIC_ID) {
+        return true;
+    }
+    return (a->val[5] & 0xC0) == 0xC0;   /* static random; 01 = resolvable, 00 = non-resolvable */
+}
+
 static int gap_event(struct ble_gap_event *ev, void *arg)
 {
     switch (ev->type) {
@@ -82,6 +96,16 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_MTU:
         ESP_LOGI(TAG, "MTU %d", ev->mtu.value);
+        break;
+    case BLE_GAP_EVENT_SCAN_REQ_RCVD:
+        /* An actively scanning gateway sends a scan request for each advert it hears.
+         * Gateways (ESP32, Nordic, commercial units) use a fixed identity: a public or a
+         * static random address (top two bits 11). Phones use rotating private addresses,
+         * which are ignored so a phone nearby does not count as a gateway. */
+        if (is_gateway_addr(&ev->scan_req_rcvd.scan_addr)) {
+            s_gw_seen_us = esp_timer_get_time();
+            s_scan_reqs++;
+        }
         break;
     default:
         break;   /* ADV_COMPLETE at the end of each burst is expected */
@@ -111,6 +135,22 @@ esp_err_t telemetry_ble_init(const char *name)
     return ESP_OK;
 }
 
+static int set_rsp(void)
+{
+    struct os_mbuf *m = os_msys_get_pkthdr(s_rsp_len, 0);
+    if (!m || os_mbuf_append(m, s_rsp, s_rsp_len) != 0) {
+        if (m) {
+            os_mbuf_free_chain(m);
+        }
+        return BLE_HS_ENOMEM;
+    }
+    int rc = ble_gap_ext_adv_rsp_set_data(ADV_INSTANCE, m);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ext_adv_rsp_set_data rc=%d", rc);
+    }
+    return rc;
+}
+
 esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int duration_ms)
 {
     if (!s_synced) {
@@ -128,29 +168,52 @@ esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int 
     memcpy(&adv[n], payload, TELEMETRY_PAYLOAD_LEN);
     n += TELEMETRY_PAYLOAD_LEN;
 
-    if (ble_gap_adv_active()) {
-        ble_gap_adv_stop();
+    if (ble_gap_ext_adv_active(ADV_INSTANCE)) {
+        ble_gap_ext_adv_stop(ADV_INSTANCE);
     }
-    int rc = ble_gap_adv_set_data(adv, (int)n);
+    int rc;
+    if (!s_adv_configured) {
+        /* Extended-advertising API with legacy PDUs (ADV_IND): on air this is identical to
+         * plain legacy advertising, but the controller reports scan requests. */
+        struct ble_gap_ext_adv_params p = {
+            .connectable = 1,                  /* the gateway connects for ECG / time */
+            .scannable = 1,
+            .legacy_pdu = 1,
+            .scan_req_notif = 1,
+            .itvl_min = BLE_GAP_ADV_ITVL_MS(100),
+            .itvl_max = BLE_GAP_ADV_ITVL_MS(100),
+            .own_addr_type = s_own_addr_type,
+            .primary_phy = BLE_HCI_LE_PHY_1M,
+            .secondary_phy = BLE_HCI_LE_PHY_1M,
+            .tx_power = 127,                   /* no preference: controller default (+15 dBm) */
+        };
+        int8_t txp = 0;
+        rc = ble_gap_ext_adv_configure(ADV_INSTANCE, &p, &txp, gap_event, NULL);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ext_adv_configure rc=%d", rc);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "advertising configured (legacy PDUs, scan-request notify, %d dBm)", txp);
+        s_adv_configured = true;
+    }
+    struct os_mbuf *m = os_msys_get_pkthdr(n, 0);
+    if (!m || os_mbuf_append(m, adv, n) != 0) {
+        if (m) {
+            os_mbuf_free_chain(m);
+        }
+        return ESP_ERR_NO_MEM;
+    }
+    rc = ble_gap_ext_adv_set_data(ADV_INSTANCE, m);   /* takes ownership of m */
     if (rc != 0) {
-        ESP_LOGE(TAG, "adv_set_data rc=%d", rc);
+        ESP_LOGE(TAG, "ext_adv_set_data rc=%d", rc);
         return ESP_FAIL;
     }
     if (s_rsp_len) {
-        rc = ble_gap_adv_rsp_set_data(s_rsp, (int)s_rsp_len);
-        if (rc != 0) {
-            ESP_LOGW(TAG, "adv_rsp_set_data rc=%d", rc);
-        }
+        set_rsp();
     }
-    struct ble_gap_adv_params p = {
-        .conn_mode = BLE_GAP_CONN_MODE_UND,    /* connectable: the gateway connects for ECG / time */
-        .disc_mode = BLE_GAP_DISC_MODE_GEN,
-        .itvl_min = BLE_GAP_ADV_ITVL_MS(100),
-        .itvl_max = BLE_GAP_ADV_ITVL_MS(100),
-    };
-    rc = ble_gap_adv_start(s_own_addr_type, NULL, duration_ms, &p, gap_event, NULL);
+    rc = ble_gap_ext_adv_start(ADV_INSTANCE, duration_ms / 10, 0);
     if (rc != 0) {
-        ESP_LOGE(TAG, "adv_start rc=%d", rc);
+        ESP_LOGE(TAG, "ext_adv_start rc=%d", rc);
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -182,15 +245,26 @@ esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint6
         n += name_len;
     }
     s_rsp_len = n;
-    if (!s_synced) {
+    if (!s_synced || !s_adv_configured) {
         return ESP_OK;   /* applied on the next burst */
     }
-    return ble_gap_adv_rsp_set_data(s_rsp, (int)s_rsp_len) == 0 ? ESP_OK : ESP_FAIL;
+    return set_rsp() == 0 ? ESP_OK : ESP_FAIL;
 }
 
 void telemetry_ble_stop(void)
 {
-    if (s_synced && ble_gap_adv_active()) {
-        ble_gap_adv_stop();
+    if (s_synced && ble_gap_ext_adv_active(ADV_INSTANCE)) {
+        ble_gap_ext_adv_stop(ADV_INSTANCE);
     }
+}
+
+bool telemetry_gateway_seen(uint32_t max_age_ms)
+{
+    int64_t t = s_gw_seen_us;
+    return t >= 0 && esp_timer_get_time() - t <= (int64_t)max_age_ms * 1000;
+}
+
+uint32_t telemetry_scan_requests(void)
+{
+    return s_scan_reqs;
 }

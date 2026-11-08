@@ -40,7 +40,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 ## Device behaviour (user view)
 
 1. **Power on:** hold the power button ~1.5 s. Green double flash, then **both LEDs blink green**: scan the horse's tag.
-2. **Tag read** (or 2 min timeout): D1 gives a short blue blink every 5 s, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
+2. **Tag read** (or 2 min timeout): D1 gives a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
 3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
 4. **Plugging in USB** while running on battery ends the session automatically (after 2 s): orange flashes, then charge-only (D2 red/green). Booting while already on USB keeps running (bench use).
 5. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (D2 red = charging, green = full).
@@ -109,6 +109,12 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 - **RTC oscillator-stop flag** was seen once after the RFID reader switched on (coin cell is fitted).
   Firmware tolerates it (plausible date still used) and the gateway re-syncs time. Measure the coin cell
   if it recurs.
+- **Gateway receipt (green heartbeat):** the advert is plain legacy ADV_IND (any gateway receives it),
+  sent through NimBLE's extended-advertising API only so the controller reports scan requests. An
+  actively scanning gateway sends one per advert it hears; that is the receipt. Requirements for a
+  commercial gateway: **active scanning**, and a public or static-random address (phones' rotating
+  private addresses are ignored). A passive-scanning gateway still gets all the data; D1 just stays blue.
+  "Connected" = a scan request within the last ~65 s (two bursts).
 - **Gateway DB**: readings are not unique by (seq, uptime); de-dup is in memory per burst. Session
   losses are only counted within one gateway run + one device session.
 

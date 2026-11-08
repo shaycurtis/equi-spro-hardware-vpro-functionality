@@ -21,6 +21,7 @@ typedef struct { uint8_t r, g, b; } led_colour_t;
 #define LED_ORANGE  ((led_colour_t){ 24, 8, 0 })
 #define LED_WHITE   ((led_colour_t){ 10, 10, 10 })
 #define LED_RUNNING ((led_colour_t){ 0, 10, 40 })   /* "device on" colour (pulse / breathe peak) */
+#define LED_LINKED  ((led_colour_t){ 0, 32, 4 })    /* heartbeat colour while a gateway hears us */
 
 #define LED_IDX_STATUS  0   /* D1: device on (heartbeat pulse) */
 #define LED_IDX_CHARGE  1   /* D2: charge state */
