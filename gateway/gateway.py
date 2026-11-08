@@ -4,7 +4,8 @@ Scans for VPro telemetry adverts, de-duplicates each 2 s burst (one reading per
 device+seq), prints it, and stores it in SQLite. Also tracks reception quality for
 range testing: adverts heard per burst, best RSSI, and missed bursts (seq gaps).
 
-    python gateway.py                 # scan and log to data/telemetry.db
+    python gateway.py --serial COM4   # via the ESP32 receiver dev kit (recommended)
+    python gateway.py                 # via the PC's own Bluetooth
     python gateway.py --verbose       # also print every individual advert
 """
 from __future__ import annotations
@@ -68,13 +69,28 @@ class Gateway:
         self.stats: dict[str, DeviceStats] = {}
 
     def on_advert(self, device: BLEDevice, adv: AdvertisementData) -> None:
+        """bleak callback (PC Bluetooth)."""
         payload = adv.manufacturer_data.get(COMPANY_ID)
-        if not payload:
-            return
+        if payload:
+            self.handle(device.address, adv.rssi, bytes(payload))
+
+    def on_serial_line(self, line: str) -> None:
+        """Line from the ESP32 receiver (gateway-receiver firmware)."""
+        parts = line.strip().split(",")
+        if parts[0] == "EQADV" and len(parts) == 4:
+            try:
+                self.handle(parts[1], int(parts[2]), bytes.fromhex(parts[3]))
+            except ValueError:
+                pass
+        elif parts[0] == "EQRX":
+            print("receiver ready")
+        elif parts[0] == "EQHB" and self.verbose:
+            print(f"  receiver heartbeat: up {parts[1]} s, {parts[2]} adverts forwarded")
+
+    def handle(self, address: str, rssi: int, payload: bytes) -> None:
         t = decode(payload)
         if t is None:
             return
-        rssi = adv.rssi
         if self.verbose:
             print(f"  adv {t.device_id} seq={t.seq} rssi={rssi}")
 
@@ -102,7 +118,7 @@ class Gateway:
         st.packets += 1
         st.rssi.append(rssi)
 
-        row_id = self.store(t, rssi, device.address)
+        row_id = self.store(t, rssi, address)
         self.current[t.device_id] = (t.seq, t.uptime_min, row_id)
         self.print_reading(t, rssi)
 
@@ -150,6 +166,7 @@ async def main() -> None:
     ap.add_argument("--verbose", action="store_true", help="print every advert, not just one per burst")
     ap.add_argument("--summary", type=int, default=300, help="seconds between reception summaries")
     ap.add_argument("--duration", type=float, default=0, help="stop after N seconds (0 = run until Ctrl+C)")
+    ap.add_argument("--serial", metavar="COMx", help="read from the ESP32 receiver on this port instead of PC Bluetooth")
     args = ap.parse_args()
     if args.duration:
         asyncio.get_running_loop().call_later(args.duration, lambda: stop.set())
@@ -161,17 +178,41 @@ async def main() -> None:
         except NotImplementedError:   # Windows: Ctrl+C raises KeyboardInterrupt instead
             pass
 
-    print(f"Scanning for Equimetrics adverts (company 0x{COMPANY_ID:04X}), logging to {args.db}")
+    source = f"ESP32 receiver on {args.serial}" if args.serial else "PC Bluetooth"
+    print(f"Listening for Equimetrics adverts via {source}, logging to {args.db}")
     print("Ctrl+C to stop.\n")
-    async with BleakScanner(detection_callback=gw.on_advert, scanning_mode="active"):
-        try:
-            while not stop.is_set():
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=args.summary)
-                except asyncio.TimeoutError:
-                    gw.print_summary()
-        finally:
-            gw.print_summary()
+
+    async def summaries() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=args.summary)
+            except asyncio.TimeoutError:
+                gw.print_summary()
+
+    try:
+        if args.serial:
+            await run_serial(gw, args.serial, stop, summaries())
+        else:
+            async with BleakScanner(detection_callback=gw.on_advert, scanning_mode="active"):
+                await summaries()
+    finally:
+        gw.print_summary()
+
+
+async def run_serial(gw: Gateway, port: str, stop: asyncio.Event, summaries) -> None:
+    import serial   # pyserial; only needed in this mode
+
+    ser = serial.Serial(port, 115200, timeout=0.5)
+    loop = asyncio.get_running_loop()
+    summary_task = asyncio.create_task(summaries)
+    try:
+        while not stop.is_set():
+            raw = await loop.run_in_executor(None, ser.readline)
+            if raw:
+                gw.on_serial_line(raw.decode("ascii", "replace"))
+    finally:
+        summary_task.cancel()
+        ser.close()
 
 
 if __name__ == "__main__":

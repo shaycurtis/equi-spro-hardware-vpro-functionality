@@ -1,0 +1,24 @@
+# Equimetrics BLE gateway receiver - ESP32-S3-WROOM-2 dev kit.
+# PLAIN development board: no secure boot, no flash encryption. Never reuse the VPro sdkconfig here.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_SECURE_BOOT=n
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+
+# WROOM-2: octal (OPI) flash at 1.8 V; use 16 MB of the 32 MB part (no 4-byte addressing needed)
+CONFIG_ESPTOOLPY_OCT_FLASH=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# BLE: NimBLE, observer only (central role will be added for on-demand ECG in phase 2d)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+CONFIG_BT_NIMBLE_NVS_PERSIST=n
+CONFIG_BT_CTRL_BLE_SCAN_DUPL=n
+
+# Console carries the data stream; keep logs quiet
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
