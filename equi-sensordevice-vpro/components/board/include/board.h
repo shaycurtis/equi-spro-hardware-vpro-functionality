@@ -42,7 +42,8 @@
 #define BOARD_PIN_SD_MOSI     GPIO_NUM_10
 
 /* ---- UARTs ---- */
-#define BOARD_PIN_GPS_RX_NET  GPIO_NUM_11  /* net "GPS_RX" -> LC29H pin 20 (verify direction) */
-#define BOARD_PIN_GPS_TX_NET  GPIO_NUM_2   /* net "GPS_TX" -> LC29H pin 21 (verify direction) */
+#define BOARD_PIN_GPS_RX      GPIO_NUM_11  /* ESP RX <- LC29H TXD (pin 20). Verified: NMEA arrives here */
+#define BOARD_PIN_GPS_TX      GPIO_NUM_2   /* ESP TX -> LC29H RXD (pin 21) */
+#define BOARD_GPS_BAUD        115200       /* as found on the SPro unit */
 #define BOARD_PIN_RFID_RX     GPIO_NUM_38  /* JY-LD6900 TX -> ESP RX */
 #define BOARD_PIN_1WIRE       GPIO_NUM_12  /* magnetic connector pin 4 */

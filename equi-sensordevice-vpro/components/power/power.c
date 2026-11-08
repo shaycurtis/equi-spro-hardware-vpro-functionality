@@ -342,6 +342,11 @@ static void power_task(void *arg)
 void power_start(void)
 {
     status_led_set_mode(LED_IDX_STATUS, LED_MODE_BREATHE, LED_RUNNING);  /* D1: "device on" */
+    /* Initial charge state so readers don't see "no USB" before the task's first poll. */
+    if (power_usb_present()) {
+        s_charge = gpio_get_level(BOARD_PIN_CHG_IND) ? POWER_CHARGE_DONE : POWER_CHARGE_CHARGING;
+        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, charge_colour(s_charge));
+    }
     xTaskCreate(power_task, "power", 3072, NULL, 10, &s_task);
     gpio_set_intr_type(BOARD_PIN_PWR_BTN, GPIO_INTR_ANYEDGE);
     gpio_install_isr_service(0);

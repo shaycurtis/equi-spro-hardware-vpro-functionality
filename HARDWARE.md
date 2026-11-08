@@ -9,7 +9,7 @@ MCU: **ESP32-S3-WROOM-1-N16R8** (U1): 16 MB quad flash, 8 MB octal PSRAM (GPIO35
 | EN | 3 | EN | SW4 (reset), Q7 auto-reset, 10k pull-up | |
 | 0 | 27 | IO0 | SW3 (boot), Q6 auto-reset, 4.7k pull-up | strapping |
 | 1 | 39 | LED | D1 DIN (WS2812B-2020) → D2 | 4.7k pull-down R5 |
-| 2 | 38 | GPS_TX | LC29H pin 21, TP13 | check direction vs LC29H datasheet |
+| 2 | 38 | GPS_TX | LC29H pin 21 (RXD), TP13 | ESP TX -> GPS (verified) |
 | 3 | 15 | SD_CS | microSD | strapping (JTAG source) |
 | 4 | 4 | PWR_BTN | SW2 via D7 + divider | reads power button, active high |
 | 5 | 5 | RFID_EN | Q3 → Q2 P-FET → RFID VIN | high = RFID powered |
@@ -18,7 +18,7 @@ MCU: **ESP32-S3-WROOM-1-N16R8** (U1): 16 MB quad flash, 8 MB octal PSRAM (GPIO35
 | 8 | 12 | IMU_INT1 | LSM6DSOX INT1 | |
 | 9 | 17 | SD_MISO | microSD | |
 | 10 | 18 | SD_MOSI | microSD | |
-| 11 | 19 | GPS_RX | LC29H pin 20, TP14 | |
+| 11 | 19 | GPS_RX | LC29H pin 20 (TXD), TP14 | ESP RX <- GPS NMEA, 115200 baud (verified) |
 | 12 | 20 | ESP_1WIRE | magnetic connector pin 4 (ESD U15), 4.7k pull-up | |
 | 13 | 21 | VCC_CTRL | enables both 1.8 V LDOs (MAX30001 AVDD/OVDD) | |
 | 14 | 22 | PWR_GD | charger REGN divider (100k/150k) | high = USB power present |
