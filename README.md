@@ -4,7 +4,8 @@ Custom firmware for the Equimetrics SPRO sensor board (ESP32-S3-WROOM-1-N16R8), 
 chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-08, afternoon** (after the overnight test).
 
 > **Signing keys never leave this PC.** `**/private/` and `*.pem` are git-ignored. All
-> building and signing is local.
+> building and signing is local. The **fleet key** (`private/fleet_key.bin`, 16 bytes) is built into the
+> firmware and read by the gateway to decrypt identities; same rule, and the build fails without it.
 
 ## Repository layout
 
@@ -27,7 +28,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | LEDs | ✅ D1 short blue blink every 5 s while on; D2 shows charge state (red/green/orange); both blink green while waiting for an RFID tag |
 | Sensors (30 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer), RTC (PCF85063A) |
 | GPS | ✅ Parked in backup mode at boot (`$PAIR650,0`, verified) |
-| BLE telemetry | ✅ Advert v4 every 30 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate; identity scan response |
+| BLE telemetry | ✅ Advert v5 every 30 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
 | Sessions + RFID HorseID | ✅ Session = Unix time at boot; tag scanned at boot (JY-LD6900, 9600 ASCII); per-session dashboard view |
@@ -40,7 +41,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 ## Device behaviour (user view)
 
 1. **Power on:** hold the power button ~1.5 s. Green double flash, then **both LEDs blink green**: scan the horse's tag.
-2. **Tag read** (or 2 min timeout): D1 gives a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
+2. **Tag read** (or 2 min timeout): D1 **steady blue** until a trusted gateway has received the session (encrypted identity), then a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
 3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
 4. **Plugging in USB** while running on battery ends the session automatically (after 2 s): orange flashes, then charge-only (D2 red/green). Booting while already on USB keeps running (bench use).
 5. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (D2 red = charging, green = full).
@@ -82,7 +83,7 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Protocols (source of truth in code)
 
-- **Telemetry advert v4 + identity scan response:** `equi-sensordevice-vpro/components/telemetry/include/telemetry.h`
+- **Telemetry advert v5 + encrypted identity scan response:** `equi-sensordevice-vpro/components/telemetry/include/telemetry.h`
   (decoder: `gateway/equi_protocol.py`). Company ID `0xFFFF` is a **test ID**, so get an Equimetrics SIG ID for production.
 - **ECG GATT service:** `equi-sensordevice-vpro/components/telemetry/ecg_service.h` (start/stop/set-time, 112-sample notifications).
 - **Receiver serial lines:** top of `gateway-receiver/main/receiver_main.c` (`EQADV`, `EQECG*`, `ECG,...` command).
@@ -118,8 +119,11 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
   ~65 s it sets advert flag bit 6 (`NO_GATEWAY`); the PC gateway then connects and sets the time,
   which pairs it (rate-limited to once per 2 min per device). Verified: pairs on the first burst,
   goes blue ~60-90 s after the receiver is unplugged, green again on the next burst when it returns.
-  **Commercial gateway requirements:** active scanning, plus the ability to connect and write one
-  characteristic when it sees flag bit 6. A passive / non-connecting gateway still gets all the data.
+  **Gateway decision (2026-11-08): off-the-shelf, listen-only gateways** (no BLE connections; we
+  can't certify our own). Requirements: active scanning and forwarding scan responses (the encrypted
+  identity is in the scan response). The connect-to-pair path above is a **dev shortcut** only; in
+  production the trusted-gateway list will come from the SD card / Wi-Fi while charging. Live ECG at
+  the barn is not required; later options: a phone app over BLE, or Wi-Fi streaming on request.
 - **Gateway DB**: readings are not unique by (seq, uptime); de-dup is in memory per burst. Session
   losses are only counted within one gateway run + one device session.
 

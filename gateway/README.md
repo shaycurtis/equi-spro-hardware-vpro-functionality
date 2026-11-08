@@ -48,3 +48,11 @@ Adverts with flag bit 6 (`no_gateway`) mean no trusted gateway has heard the dev
 gateway then connects through the receiver and sets the device clock (`ECG,<addr>,0,0,<epoch>`),
 at most every 2 minutes per device. Any successful command write makes the device trust this
 gateway, and its scan requests then turn the device's 5 s heartbeat green.
+
+## Advert v5 and the encrypted identity
+
+v5 adverts carry only a 1-byte session tag. The session ID and HorseID travel in the scan response,
+encrypted with AES-128-CCM under the fleet key (`<repo>/private/fleet_key.bin`, or `--fleet-key`).
+Without the key the gateway still stores readings, but can't attach them to a session or horse.
+Readings heard before the identity are stored with `session_tag` and no `device_session`, and are
+attached when the identity arrives (within 24 h).

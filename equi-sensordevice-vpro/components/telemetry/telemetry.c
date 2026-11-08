@@ -3,6 +3,8 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_random.h"
+#include "psa/crypto.h"
 #include "nvs.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
@@ -47,15 +49,49 @@ void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN])
     out[2] = (t->device_id >> 16) & 0xff;
     out[3] = (t->device_id >> 8) & 0xff;
     out[4] = t->device_id & 0xff;
-    put32(&out[5], t->session);
-    out[9] = t->seq;
-    out[10] = t->flags;
-    put16(&out[11], t->battery_soc256);
-    put16(&out[13], t->battery_mv);
-    put16(&out[15], (uint16_t)t->temp_c100);
-    out[17] = t->humidity_half;
-    put32(&out[18], t->steps);
-    out[22] = t->heart_rate;
+    out[5] = (uint8_t)t->session;      /* session_tag */
+    out[6] = t->seq;
+    out[7] = t->flags;
+    put16(&out[8], t->battery_soc256);
+    put16(&out[10], t->battery_mv);
+    put16(&out[12], (uint16_t)t->temp_c100);
+    out[14] = t->humidity_half;
+    put32(&out[15], t->steps);
+    out[19] = t->heart_rate;
+}
+
+/* ------------------------------------------------------------ fleet key */
+
+/* 16-byte fleet key, embedded at build time from <repo>/private/fleet_key.bin (git-ignored,
+ * never leaves the build PC; flash encryption protects it on the device). */
+extern const uint8_t fleet_key_start[] asm("_binary_fleet_key_bin_start");
+extern const uint8_t fleet_key_end[] asm("_binary_fleet_key_bin_end");
+
+#define CCM_TAG_LEN   4
+#define CCM_ALG       PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, CCM_TAG_LEN)
+
+static psa_key_id_t s_fleet_key;
+
+static esp_err_t fleet_key_init(void)
+{
+    if (fleet_key_end - fleet_key_start != 16) {
+        ESP_LOGE(TAG, "fleet key must be 16 bytes (got %d)", (int)(fleet_key_end - fleet_key_start));
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        return ESP_FAIL;
+    }
+    psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&a, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&a, 128);
+    psa_set_key_usage_flags(&a, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&a, CCM_ALG);
+    psa_status_t st = psa_import_key(&a, fleet_key_start, 16, &s_fleet_key);
+    if (st != PSA_SUCCESS) {
+        ESP_LOGE(TAG, "fleet key import failed (%d)", (int)st);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 /* --------------------------------------------------------------------- BLE */
@@ -124,8 +160,7 @@ void telemetry_trust_peer(uint16_t conn_handle)
     ble_addr_t a = d.peer_id_addr;
     a.type &= 1;
     if (s_ngw && same_addr(&s_gw[0], &a)) {
-        s_gw_seen_us = esp_timer_get_time();   /* it is talking to us right now */
-        return;                                /* already the most recent: nothing to save */
+        return;   /* already the most recent: nothing to save */
     }
     /* Most recent first; drop the oldest when full. */
     int i = 0;
@@ -139,8 +174,7 @@ void telemetry_trust_peer(uint16_t conn_handle)
     for (int k = (i < MAX_GATEWAYS ? i : MAX_GATEWAYS - 1); k > 0; k--) {
         s_gw[k] = s_gw[k - 1];
     }
-    s_gw[0] = a;
-    s_gw_seen_us = esp_timer_get_time();
+    s_gw[0] = a;   /* its next scan request counts as "heard" (and delivers the identity) */
     const uint8_t *v = a.val;
     ESP_LOGI(TAG, "%s gateway %02X:%02X:%02X:%02X:%02X:%02X", is_new ? "learned" : "re-confirmed",
              v[5], v[4], v[3], v[2], v[1], v[0]);
@@ -253,6 +287,10 @@ esp_err_t telemetry_ble_init(const char *name)
     }
     ble_att_set_preferred_mtu(247);
     gateways_load();
+    err = fleet_key_init();
+    if (err != ESP_OK) {
+        return err;
+    }
     nimble_port_freertos_init(host_task);
     return ESP_OK;
 }
@@ -354,18 +392,26 @@ esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint6
     r[n++] = (device_id >> 16) & 0xff;
     r[n++] = (device_id >> 8) & 0xff;
     r[n++] = device_id & 0xff;
-    put32(&r[n], session);
+    uint32_t rnd = esp_random();      /* new nonce for every identity change */
+    put32(&r[n], rnd);
+    const uint8_t *aad = &r[4];       /* magic .. nonce (9 bytes) */
     n += 4;
+
+    uint8_t nonce[7] = { r[6], r[7], r[8], r[9], r[10], r[11], r[12] };   /* device_id + rnd */
+    uint8_t pt[10];
+    put32(&pt[0], session);
     for (int i = 0; i < 6; i++) {
-        r[n++] = (uint8_t)(horse_id >> (8 * i));
+        pt[4 + i] = (uint8_t)(horse_id >> (8 * i));
     }
-    size_t name_len = strlen(s_name);
-    if (name_len && n + 2 + name_len <= sizeof(s_rsp)) {
-        r[n++] = (uint8_t)(1 + name_len);
-        r[n++] = BLE_HS_ADV_TYPE_COMP_NAME;
-        memcpy(&r[n], s_name, name_len);
-        n += name_len;
+    size_t out_len = 0;
+    psa_status_t st = psa_aead_encrypt(s_fleet_key, CCM_ALG, nonce, sizeof(nonce), aad, 9, pt, sizeof(pt),
+                                       &r[n], sizeof(s_rsp) - n, &out_len);
+    if (st != PSA_SUCCESS || out_len != sizeof(pt) + CCM_TAG_LEN) {
+        ESP_LOGE(TAG, "identity encrypt failed (%d)", (int)st);
+        s_rsp_len = 0;
+        return ESP_FAIL;
     }
+    n += out_len;
     s_rsp_len = n;
     if (!s_synced || !s_adv_configured) {
         return ESP_OK;   /* applied on the next burst */
@@ -378,6 +424,11 @@ void telemetry_ble_stop(void)
     if (s_synced && ble_gap_ext_adv_active(ADV_INSTANCE)) {
         ble_gap_ext_adv_stop(ADV_INSTANCE);
     }
+}
+
+int64_t telemetry_gateway_last_seen_us(void)
+{
+    return s_gw_seen_us;
 }
 
 bool telemetry_gateway_seen(uint32_t max_age_ms)

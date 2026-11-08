@@ -26,7 +26,8 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
 from ecg_manager import EcgManager
-from equi_protocol import COMPANY_ID, SESSION_RANDOM_BIT, Identity, Telemetry, decode
+import equi_protocol
+from equi_protocol import COMPANY_ID, DEFAULT_FLEET_KEY, SESSION_RANDOM_BIT, Identity, Telemetry, decode
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -51,7 +52,9 @@ CREATE TABLE IF NOT EXISTS readings (
     session       INTEGER,              -- gateway run (start time); loss stats only compare within one
     device_session INTEGER,             -- device session ID (Unix time it started; bit 31 = random)
     horse_id      TEXT,                 -- 15-digit RFID of the horse for that session, if scanned
-    heart_rate    INTEGER               -- bpm (v4 firmware), NULL = no beats detected
+    heart_rate    INTEGER,              -- bpm (v4 firmware), NULL = no beats detected
+    session_tag   INTEGER               -- v5: low byte of the session ID (device_session filled in
+                                        -- once the encrypted identity has been decrypted)
     -- No UNIQUE key: seq and uptime restart at every device boot, so they are not unique over
     -- time. Duplicate adverts within a burst are merged in memory before insert.
 );
@@ -84,7 +87,8 @@ class Gateway:
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")   # web app reads while we write
         self.db.executescript(SCHEMA)
-        for col in ("session INTEGER", "device_session INTEGER", "horse_id TEXT", "heart_rate INTEGER"):
+        for col in ("session INTEGER", "device_session INTEGER", "horse_id TEXT", "heart_rate INTEGER",
+                    "session_tag INTEGER"):
             try:   # databases created before these columns existed
                 self.db.execute(f"ALTER TABLE readings ADD COLUMN {col}")
             except sqlite3.OperationalError:
@@ -152,7 +156,14 @@ class Gateway:
         if self.verbose:
             print(f"  adv {t.device_id} seq={t.seq} rssi={rssi}")
 
-        key = (t.session, t.seq, t.uptime_min)
+        if t.session_tag is not None:
+            # v5 only carries the low byte of the session ID; the full ID comes from the encrypted
+            # identity (scan response). Until that has been heard the reading has no session yet and
+            # is attached later (on_identity backfills by tag).
+            ident = self.identity.get(t.device_id)
+            if ident and ident[0] & 0xFF == t.session_tag:
+                t.session = ident[0]
+        key = (t.session if t.session_tag is None else ("tag", t.session_tag), t.seq, t.uptime_min)
         cur = self.current.get(t.device_id)
         st = self.stats.setdefault(t.device_id, DeviceStats())
         if cur and cur[0] == key:
@@ -168,7 +179,7 @@ class Gateway:
             return
 
         # New burst = new reading. Seq gaps only count as losses within one device session.
-        if st.last_seq is not None and cur and cur[0][0] == t.session:
+        if st.last_seq is not None and cur and cur[0][0] == key[0]:
             gap = (t.seq - st.last_seq) % 256
             if gap > 1:
                 st.missed += gap - 1
@@ -195,6 +206,16 @@ class Gateway:
         print(f"{datetime.now():%H:%M:%S}  {i.device_id}  session {i.session}  HorseID {i.horse_id or '(not scanned)'}")
         with self.lock:
             self._touch_session(i.device_id, i.session, count=False)
+            # v5 readings that arrived before the identity: attach them to this session.
+            cur = self.db.execute(
+                "UPDATE readings SET device_session = ? WHERE device_id = ? AND device_session IS NULL "
+                "AND session_tag = ? AND received_at >= ?",
+                (i.session, i.device_id, i.session & 0xFF,
+                 datetime.fromtimestamp(time.time() - 86400, timezone.utc).isoformat(timespec="seconds")))
+            if cur.rowcount:
+                self.db.execute("UPDATE device_sessions SET readings = readings + ? WHERE device_id = ? AND "
+                                "session_id = ?", (cur.rowcount, i.device_id, i.session))
+                print(f"  attached {cur.rowcount} earlier reading(s) to session {i.session}")
             if i.horse_id:
                 self.db.execute("UPDATE device_sessions SET horse_id = ? WHERE device_id = ? AND session_id = ?",
                                 (i.horse_id, i.device_id, i.session))
@@ -237,12 +258,12 @@ class Gateway:
             """INSERT INTO readings
                (received_at, device_id, seq, uptime_min, battery_soc, battery_mv, temp_c, humidity,
                 steps, usb, charging, charge_full, charger_fault, rtc_valid, rssi_best, packets, address, session,
-                device_session, horse_id, heart_rate)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)""",
+                device_session, horse_id, heart_rate, session_tag)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(timespec="seconds"), r["device_id"], r["seq"],
              uptime, r["battery_soc"], r["battery_mv"], r["temp_c"], r["humidity"], r["steps"],
              r["usb"], r["charging"], r["charge_full"], r["charger_fault"], r["rtc_valid"], rssi, address,
-             self.session, r["session"], self.horse_for(t), r["heart_rate"]),
+             self.session, r["session"], self.horse_for(t), r["heart_rate"], r["session_tag"]),
         )
         if r["session"] is not None:
             self._touch_session(r["device_id"], r["session"], count=True)
@@ -284,7 +305,12 @@ async def main() -> None:
     ap.add_argument("--web", metavar="PORT", type=int, nargs="?", const=8080,
                     help="also serve the dashboard (default port 8080)")
     ap.add_argument("--battery-mah", type=float, default=1500, help="battery capacity for drain/runtime estimates")
+    ap.add_argument("--fleet-key", type=Path, default=DEFAULT_FLEET_KEY,
+                    help="16-byte fleet key file for the encrypted identity (default: <repo>/private/fleet_key.bin)")
     args = ap.parse_args()
+    if not equi_protocol.load_fleet_key(args.fleet_key):
+        print(f"WARNING: fleet key {args.fleet_key} not found - sessions and HorseIDs from v5 firmware "
+              "cannot be read\n")
     if args.duration:
         asyncio.get_running_loop().call_later(args.duration, lambda: stop.set())
 

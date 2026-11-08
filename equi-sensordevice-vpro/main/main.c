@@ -115,9 +115,12 @@ static uint32_t new_session_id(void)
     return esp_random() | 0x80000000u;   /* RTC has no time: random, flagged by bit 31 */
 }
 
+static volatile int64_t s_identity_at_us;   /* when the current identity was published */
+
 static void publish_identity(void)
 {
     telemetry_ble_set_identity(s_dev_id, s_session, s_horse);
+    s_identity_at_us = esp_timer_get_time();   /* not delivered until a gateway asks again */
 }
 
 /* A gateway counts as "connected" while it answered (scan request) within this window:
@@ -136,14 +139,32 @@ static bool gateway_wanted(void)
     return !telemetry_has_trusted_gateway() || esp_timer_get_time() / 1000 > GATEWAY_SEEN_MS;
 }
 
-static led_colour_t heartbeat_colour(void)
+/* The identity (session + HorseID) travels in the scan response, so a trusted gateway's scan
+ * request after it was published means that gateway has received it. */
+static bool identity_delivered(void)
 {
-    return telemetry_gateway_seen(GATEWAY_SEEN_MS) ? LED_LINKED : LED_RUNNING;
+    return telemetry_gateway_last_seen_us() > s_identity_at_us;
+}
+
+/*
+ * D1 while running:
+ *   steady blue  - session not yet delivered to a trusted gateway ("not connected")
+ *   green blink  - delivered, and a trusted gateway is hearing us
+ *   blue blink   - delivered earlier, but no trusted gateway heard us for ~1 min (out of range)
+ */
+static void show_status_led(void)
+{
+    if (!identity_delivered()) {
+        status_led_set_mode(LED_IDX_STATUS, LED_MODE_SOLID, LED_BLUE);
+    } else {
+        status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE,
+                            telemetry_gateway_seen(GATEWAY_SEEN_MS) ? LED_LINKED : LED_RUNNING);
+    }
 }
 
 static void show_running_leds(void)
 {
-    status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE, heartbeat_colour());   /* 5 s heartbeat */
+    show_status_led();
     status_led_set_mode(LED_IDX_CHARGE, LED_MODE_OFF, LED_OFF);
     power_set_charge_led(true);          /* D2 back to the charge state (off unless on USB) */
 }
@@ -264,7 +285,7 @@ static void sample_task(void *arg)
         ESP_LOGI(TAG, "%lu gateway scan requests in the burst", (unsigned long)(telemetry_scan_requests() - reqs0));
         telemetry_log_scanners();
         if (!s_scanning) {
-            status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE, heartbeat_colour());
+            show_status_led();
         }
 
         next_us += (int64_t)SAMPLE_PERIOD_S * 1000000;
