@@ -51,6 +51,7 @@
 #define TELEM_FLAG_FAULT       (1u << 3)
 #define TELEM_FLAG_RTC_VALID   (1u << 4)
 #define TELEM_FLAG_RFID_SCAN   (1u << 5)
+#define TELEM_FLAG_NO_GATEWAY  (1u << 6)   /* no trusted gateway heard us recently: please connect + write */
 
 typedef struct {
     uint32_t device_id;     /* 24 bits used */
@@ -79,11 +80,20 @@ esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint6
 /* Stop advertising (shutdown). */
 void telemetry_ble_stop(void);
 
-/* True if a gateway sent a scan request for one of our adverts within max_age_ms. The
- * receipt only works with gateways that scan actively (most commercial gateways can; the
- * advert itself is plain legacy ADV_IND, so passive gateways still get all the data). Counts
- * public / static-random scanners only (phones use rotating private addresses). */
+/* True if a trusted gateway sent a scan request for one of our adverts (or talked to us
+ * over a connection) within max_age_ms. Needs a gateway that scans actively; the advert
+ * itself is plain legacy ADV_IND, so passive gateways still get all the data. */
 bool telemetry_gateway_seen(uint32_t max_age_ms);
+
+/* Remember the peer on this connection as a trusted gateway (called when it writes a
+ * command). Stored in NVS, up to 4, most recent first. */
+void telemetry_trust_peer(uint16_t conn_handle);
+
+/* True once at least one gateway has been learned. */
+bool telemetry_has_trusted_gateway(void);
 
 /* Total gateway scan requests since boot (for logging). */
 uint32_t telemetry_scan_requests(void);
+
+/* Log each distinct scanner seen since the last call (address, type, count), then reset. */
+void telemetry_log_scanners(void);

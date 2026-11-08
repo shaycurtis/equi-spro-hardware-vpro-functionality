@@ -24,6 +24,7 @@ FLAG_FULL = 1 << 2
 FLAG_FAULT = 1 << 3
 FLAG_RTC_VALID = 1 << 4
 FLAG_RFID_SCAN = 1 << 5
+FLAG_NO_GATEWAY = 1 << 6   # no trusted gateway heard it lately: connect + write to pair
 
 SESSION_RANDOM_BIT = 1 << 31   # session is random (device RTC had no time), not a timestamp
 
@@ -38,6 +39,7 @@ class Telemetry:
     charger_fault: bool
     rtc_valid: bool
     rfid_scanning: bool
+    no_gateway: bool
     battery_soc: Optional[float]    # % (v3: 1/256 % resolution)
     battery_mv: Optional[int]
     temp_c: Optional[float]
@@ -70,7 +72,7 @@ def horse_id_str(packed: int) -> Optional[str]:
 def _flags(t: dict, flags: int) -> None:
     t.update(usb=bool(flags & FLAG_USB), charging=bool(flags & FLAG_CHARGING), charge_full=bool(flags & FLAG_FULL),
              charger_fault=bool(flags & FLAG_FAULT), rtc_valid=bool(flags & FLAG_RTC_VALID),
-             rfid_scanning=bool(flags & FLAG_RFID_SCAN))
+             rfid_scanning=bool(flags & FLAG_RFID_SCAN), no_gateway=bool(flags & FLAG_NO_GATEWAY))
 
 
 def decode(payload: bytes) -> Union[Telemetry, Identity, None]:

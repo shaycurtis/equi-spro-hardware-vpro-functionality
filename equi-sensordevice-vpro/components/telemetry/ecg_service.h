@@ -23,6 +23,7 @@
 
 #define ECG_CMD_START          0x01
 #define ECG_CMD_STOP           0x02
+#define ECG_CMD_PAIR        0x20   /* no payload: mark this central as a trusted gateway */
 #define ECG_CMD_SET_TIME       0x10
 #define ECG_FLAG_TEST_SIGNAL   0x01
 

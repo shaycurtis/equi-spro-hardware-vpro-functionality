@@ -180,8 +180,8 @@ class Gateway:
         row_id = self.store(t, rssi, address)
         self.current[t.device_id] = (key, row_id)
         self.print_reading(t, rssi, self.horse_for(t))
-        if not t.rtc_valid:
-            self.maybe_sync_time(t.device_id)
+        if not t.rtc_valid or t.no_gateway:
+            self.maybe_sync_time(t.device_id, pair=t.rtc_valid)
 
     def horse_for(self, t: Telemetry) -> str | None:
         ident = self.identity.get(t.device_id)
@@ -214,12 +214,14 @@ class Gateway:
             "VALUES (?,?,?,?,?,?) ON CONFLICT (device_id, session_id) DO UPDATE SET last_seen = excluded.last_seen, "
             "readings = readings + excluded.readings", (device_id, session, started, now, now, 1 if count else 0))
 
-    def maybe_sync_time(self, device_id: str) -> None:
-        """Device RTC has no time: set it from the PC (at most every 10 min per device)."""
-        if self.ecg.serial is None or time.time() - self.last_time_sync.get(device_id, 0) < 600:
+    def maybe_sync_time(self, device_id: str, pair: bool = False) -> None:
+        """Connect and set the device clock from the PC. Done when the RTC has no time, and when the
+        device asks for a gateway (advert flag): writing a command makes this gateway trusted, so its
+        scan requests then count as receipts (green LED). At most every 2 min per device."""
+        if self.ecg.serial is None or time.time() - self.last_time_sync.get(device_id, 0) < 120:
             return
         self.last_time_sync[device_id] = time.time()
-        self.ecg.sync_time(device_id)
+        self.ecg.sync_time(device_id, reason="pairing (device asked for a gateway)" if pair else None)
 
     def store(self, t: Telemetry, rssi: int, address: str) -> int:
         r = t.to_record()

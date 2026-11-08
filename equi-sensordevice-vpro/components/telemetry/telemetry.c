@@ -3,6 +3,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
@@ -22,6 +23,17 @@ static volatile int64_t s_gw_seen_us = -1;   /* last scan request from a gateway
 static volatile uint32_t s_scan_reqs;
 
 #define ADV_INSTANCE 0
+
+/*
+ * Trusted gateways, learned: a central that connects and writes a command (time set, ECG,
+ * pair) is remembered here and in NVS (namespace "vpro", our own; the SPro "system" data is
+ * never touched). Only scan requests from these addresses count as "a gateway hears us".
+ */
+#define MAX_GATEWAYS  4
+#define NVS_NS        "vpro"
+#define NVS_KEY_GW    "gateways"
+static ble_addr_t s_gw[MAX_GATEWAYS];
+static int s_ngw;
 
 /* ------------------------------------------------------------------ encode */
 
@@ -70,12 +82,121 @@ static void host_task(void *arg)
     nimble_port_freertos_deinit();
 }
 
+static bool same_addr(const ble_addr_t *a, const ble_addr_t *b)
+{
+    /* Identity types 2/3 (public/random ID) match their plain types 0/1. */
+    return (a->type & 1) == (b->type & 1) && memcmp(a->val, b->val, 6) == 0;
+}
+
 static bool is_gateway_addr(const ble_addr_t *a)
 {
-    if (a->type == BLE_ADDR_PUBLIC || a->type == BLE_ADDR_PUBLIC_ID) {
-        return true;
+    for (int i = 0; i < s_ngw; i++) {
+        if (same_addr(&s_gw[i], a)) {
+            return true;
+        }
     }
-    return (a->val[5] & 0xC0) == 0xC0;   /* static random; 01 = resolvable, 00 = non-resolvable */
+    return false;
+}
+
+static void gateways_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return;   /* nothing learned yet */
+    }
+    size_t len = sizeof(s_gw);
+    if (nvs_get_blob(h, NVS_KEY_GW, s_gw, &len) == ESP_OK) {
+        s_ngw = (int)(len / sizeof(s_gw[0]));
+    }
+    nvs_close(h);
+    for (int i = 0; i < s_ngw; i++) {
+        const uint8_t *v = s_gw[i].val;
+        ESP_LOGI(TAG, "trusted gateway %02X:%02X:%02X:%02X:%02X:%02X", v[5], v[4], v[3], v[2], v[1], v[0]);
+    }
+}
+
+void telemetry_trust_peer(uint16_t conn_handle)
+{
+    struct ble_gap_conn_desc d;
+    if (ble_gap_conn_find(conn_handle, &d) != 0) {
+        return;
+    }
+    ble_addr_t a = d.peer_id_addr;
+    a.type &= 1;
+    if (s_ngw && same_addr(&s_gw[0], &a)) {
+        s_gw_seen_us = esp_timer_get_time();   /* it is talking to us right now */
+        return;                                /* already the most recent: nothing to save */
+    }
+    /* Most recent first; drop the oldest when full. */
+    int i = 0;
+    while (i < s_ngw && !same_addr(&s_gw[i], &a)) {
+        i++;
+    }
+    bool is_new = i == s_ngw;
+    if (is_new && s_ngw < MAX_GATEWAYS) {
+        s_ngw++;
+    }
+    for (int k = (i < MAX_GATEWAYS ? i : MAX_GATEWAYS - 1); k > 0; k--) {
+        s_gw[k] = s_gw[k - 1];
+    }
+    s_gw[0] = a;
+    s_gw_seen_us = esp_timer_get_time();
+    const uint8_t *v = a.val;
+    ESP_LOGI(TAG, "%s gateway %02X:%02X:%02X:%02X:%02X:%02X", is_new ? "learned" : "re-confirmed",
+             v[5], v[4], v[3], v[2], v[1], v[0]);
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_set_blob(h, NVS_KEY_GW, s_gw, s_ngw * sizeof(s_gw[0])) == ESP_OK) {
+            nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+}
+
+bool telemetry_has_trusted_gateway(void)
+{
+    return s_ngw > 0;
+}
+
+/* Distinct scanners seen in the current burst (diagnostics). */
+#define MAX_SCANNERS 6
+static struct { ble_addr_t a; uint16_t n; } s_scanners[MAX_SCANNERS];
+static int s_nscanners;
+static uint16_t s_scanners_dropped;
+
+static void note_scanner(const ble_addr_t *a)
+{
+    for (int i = 0; i < s_nscanners; i++) {
+        if (ble_addr_cmp(&s_scanners[i].a, a) == 0) {
+            s_scanners[i].n++;
+            return;
+        }
+    }
+    if (s_nscanners < MAX_SCANNERS) {
+        s_scanners[s_nscanners].a = *a;
+        s_scanners[s_nscanners].n = 1;
+        s_nscanners++;
+    } else {
+        s_scanners_dropped++;
+    }
+}
+
+void telemetry_log_scanners(void)
+{
+    if (!s_nscanners) {
+        ESP_LOGI(TAG, "no scan requests in this burst");
+    }
+    for (int i = 0; i < s_nscanners; i++) {
+        const uint8_t *v = s_scanners[i].a.val;
+        ESP_LOGI(TAG, "scanner %02X:%02X:%02X:%02X:%02X:%02X type %d x%u -> %s", v[5], v[4], v[3], v[2],
+                 v[1], v[0], s_scanners[i].a.type, s_scanners[i].n,
+                 is_gateway_addr(&s_scanners[i].a) ? "trusted gateway" : "not trusted");
+    }
+    if (s_scanners_dropped) {
+        ESP_LOGI(TAG, "+%u scan requests from other scanners", s_scanners_dropped);
+    }
+    s_nscanners = 0;
+    s_scanners_dropped = 0;
 }
 
 static int gap_event(struct ble_gap_event *ev, void *arg)
@@ -99,9 +220,9 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_SCAN_REQ_RCVD:
         /* An actively scanning gateway sends a scan request for each advert it hears.
-         * Gateways (ESP32, Nordic, commercial units) use a fixed identity: a public or a
-         * static random address (top two bits 11). Phones use rotating private addresses,
-         * which are ignored so a phone nearby does not count as a gateway. */
+         * Only learned (trusted) gateways count: other scanners nearby (smart-home hubs,
+         * phones) also send scan requests. */
+        note_scanner(&ev->scan_req_rcvd.scan_addr);
         if (is_gateway_addr(&ev->scan_req_rcvd.scan_addr)) {
             s_gw_seen_us = esp_timer_get_time();
             s_scan_reqs++;
@@ -131,6 +252,7 @@ esp_err_t telemetry_ble_init(const char *name)
         return ESP_FAIL;
     }
     ble_att_set_preferred_mtu(247);
+    gateways_load();
     nimble_port_freertos_init(host_task);
     return ESP_OK;
 }

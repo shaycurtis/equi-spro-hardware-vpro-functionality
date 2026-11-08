@@ -110,7 +110,7 @@ class EcgManager:
         print(f"ECG #{cap.id}: requested {seconds} s from {device_id} ({addr}){' [test signal]' if test else ''}")
         return cap.public()
 
-    def sync_time(self, device_id: str) -> bool:
+    def sync_time(self, device_id: str, reason: str | None = None) -> bool:
         """Set a device's RTC from the PC clock (connect, set time, disconnect). Skipped while a
         capture is in progress (the receiver handles one connection at a time)."""
         if self.serial is None or (self.active and self.active.status not in FINAL):
@@ -121,7 +121,7 @@ class EcgManager:
         with self.lock:
             self.serial.write(f"ECG,{addr},0,0,{int(time.time())}\n".encode())
             self.serial.flush()
-        print(f"{device_id}: RTC not set on the device - sending the time")
+        print(f"{device_id}: {reason or 'RTC not set on the device'} - sending the time")
         return True
 
     def _last_address(self, device_id: str) -> str | None:

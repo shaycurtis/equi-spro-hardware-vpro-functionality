@@ -126,6 +126,16 @@ static void publish_identity(void)
 
 static bool s_linked;
 
+/* Ask gateways to connect (advert flag) when no trusted gateway has heard us lately. Right after
+ * boot a known gateway gets one window to show up first, so it does not reconnect every boot. */
+static bool gateway_wanted(void)
+{
+    if (telemetry_gateway_seen(GATEWAY_SEEN_MS)) {
+        return false;
+    }
+    return !telemetry_has_trusted_gateway() || esp_timer_get_time() / 1000 > GATEWAY_SEEN_MS;
+}
+
 static led_colour_t heartbeat_colour(void)
 {
     return telemetry_gateway_seen(GATEWAY_SEEN_MS) ? LED_LINKED : LED_RUNNING;
@@ -206,7 +216,8 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
                  (c == POWER_CHARGE_DONE ? TELEM_FLAG_FULL : 0) |
                  (c == POWER_CHARGE_FAULT ? TELEM_FLAG_FAULT : 0) |
                  (s->rtc_ok && s->rtc_valid ? TELEM_FLAG_RTC_VALID : 0) |
-                 (s_scanning ? TELEM_FLAG_RFID_SCAN : 0),
+                 (s_scanning ? TELEM_FLAG_RFID_SCAN : 0) |
+                 (gateway_wanted() ? TELEM_FLAG_NO_GATEWAY : 0),
         .battery_soc256 = s->fg_ok ? (uint16_t)lroundf((s->batt_soc > 100.0f ? 100.0f : s->batt_soc) * 256.0f) : 0xFFFF,
         .battery_mv = s->fg_ok ? s->batt_mv : 0,
         .temp_c100 = s->th_ok ? (int16_t)lroundf(s->temp_c * 100.0f) : 0x7FFF,
@@ -251,6 +262,7 @@ static void sample_task(void *arg)
             ESP_LOGI(TAG, "gateway %s", linked ? "connected (scan requests received)" : "lost");
         }
         ESP_LOGI(TAG, "%lu gateway scan requests in the burst", (unsigned long)(telemetry_scan_requests() - reqs0));
+        telemetry_log_scanners();
         if (!s_scanning) {
             status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE, heartbeat_colour());
         }

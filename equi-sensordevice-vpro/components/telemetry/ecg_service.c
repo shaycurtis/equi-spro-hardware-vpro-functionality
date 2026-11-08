@@ -11,6 +11,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "ecg.h"
 #include "sensors.h"
+#include "telemetry.h"
 
 static const char *TAG = "ecg_svc";
 
@@ -74,7 +75,19 @@ static void on_done(esp_err_t status, uint32_t total, uint32_t overflows, void *
     notify(pkt, sizeof(pkt));
 }
 
+static int handle_ctrl_cmd(uint16_t conn, const uint8_t *d, uint16_t len);
+
+/* Any command that succeeds marks the writer as a trusted gateway. */
 static int handle_ctrl(uint16_t conn, const uint8_t *d, uint16_t len)
+{
+    int rc = handle_ctrl_cmd(conn, d, len);
+    if (rc == 0) {
+        telemetry_trust_peer(conn);
+    }
+    return rc;
+}
+
+static int handle_ctrl_cmd(uint16_t conn, const uint8_t *d, uint16_t len)
 {
     switch (len ? d[0] : 0) {
     case ECG_CMD_START: {
@@ -113,6 +126,8 @@ static int handle_ctrl(uint16_t conn, const uint8_t *d, uint16_t len)
     case ECG_CMD_STOP:
         ecg_stop();
         return 0;
+    case ECG_CMD_PAIR:
+        return 0;   /* "I am your gateway": only the trust side effect */
     case ECG_CMD_SET_TIME: {
         if (len < 5) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
