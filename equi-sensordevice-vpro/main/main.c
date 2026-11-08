@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "esp_ota_ops.h"
+#include "esp_pm.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "device_id.h"
@@ -115,7 +116,7 @@ static void publish_identity(void)
 
 static void show_running_leds(void)
 {
-    status_led_set_mode(LED_IDX_STATUS, LED_MODE_BREATHE, LED_RUNNING);
+    status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE, LED_RUNNING);   /* 5 s heartbeat */
     status_led_set_mode(LED_IDX_CHARGE, LED_MODE_OFF, LED_OFF);
     power_set_charge_led(true);          /* D2 back to the charge state (off unless on USB) */
 }
@@ -162,9 +163,9 @@ static void scan_button_task(void *arg)
     gpio_config(&io);
     int low_ms = 0;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(100));      /* slow poll: the low-level wake-up covers sleep */
         if (gpio_get_level(BOARD_PIN_SCAN_BTN) == 0) {
-            if ((low_ms += 50) == 100) {     /* debounced press */
+            if ((low_ms += 100) == 200) {    /* debounced press */
                 ESP_LOGI(TAG, "scan button pressed");
                 start_rfid_scan();
             }
@@ -189,7 +190,7 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
                  (c == POWER_CHARGE_FAULT ? TELEM_FLAG_FAULT : 0) |
                  (s->rtc_ok && s->rtc_valid ? TELEM_FLAG_RTC_VALID : 0) |
                  (s_scanning ? TELEM_FLAG_RFID_SCAN : 0),
-        .battery_soc = s->fg_ok ? (uint8_t)(s->batt_soc > 100.0f ? 100 : s->batt_soc + 0.5f) : 0xFF,
+        .battery_soc256 = s->fg_ok ? (uint16_t)lroundf((s->batt_soc > 100.0f ? 100.0f : s->batt_soc) * 256.0f) : 0xFFFF,
         .battery_mv = s->fg_ok ? s->batt_mv : 0,
         .temp_c100 = s->th_ok ? (int16_t)lroundf(s->temp_c * 100.0f) : 0x7FFF,
         .humidity_half = s->th_ok ? (uint8_t)lroundf(s->rh * 2.0f) : 0xFF,
@@ -199,7 +200,8 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
 
 static void sample_task(void *arg)
 {
-    TickType_t last = xTaskGetTickCount();
+    /* Deadlines from esp_timer (real time): FreeRTOS ticks can lag during light sleep. */
+    int64_t next_us = esp_timer_get_time();
     uint8_t seq = 0;
     for (;;) {
         sensor_sample_t s;
@@ -221,7 +223,10 @@ static void sample_task(void *arg)
         }
         seq++;
 
-        vTaskDelayUntil(&last, pdMS_TO_TICKS(SAMPLE_PERIOD_S * 1000));
+        next_us += (int64_t)SAMPLE_PERIOD_S * 1000000;
+        for (int64_t left; (left = next_us - esp_timer_get_time()) > 0;) {
+            vTaskDelay(pdMS_TO_TICKS(left / 1000) + 1);
+        }
     }
 }
 
@@ -233,6 +238,13 @@ void app_main(void)
 
     ESP_LOGI(TAG, "VPro running");
     confirm_ota_image();
+
+    /* Dynamic frequency scaling + automatic light sleep whenever every task is idle.
+     * Drivers that need a running clock (ECG SPI polling, RFID / GNSS UART) hold a
+     * no-light-sleep lock while active. */
+    esp_pm_config_t pm = { .max_freq_mhz = 160, .min_freq_mhz = 40, .light_sleep_enable = true };
+    esp_err_t pm_err = esp_pm_configure(&pm);
+    ESP_LOGI(TAG, "power management: %s", pm_err == ESP_OK ? "light sleep enabled" : esp_err_to_name(pm_err));
     power_start();
 
     s_dev_id = strtoul(device_id_get(), NULL, 16) & 0xFFFFFF;

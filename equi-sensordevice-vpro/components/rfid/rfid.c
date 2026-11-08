@@ -19,6 +19,22 @@
 #define NATIONAL_MAX     ((1ULL << 38) - 1)
 
 static const char *TAG = "rfid";
+#include "esp_pm.h"
+
+/* Held while this driver is active: light sleep would stop its clock mid-transfer. */
+static esp_pm_lock_handle_t s_pm_lock;
+static void awake(bool on)
+{
+    if (!s_pm_lock && esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, TAG, &s_pm_lock) != ESP_OK) {
+        return;   /* power management disabled */
+    }
+    if (on) {
+        esp_pm_lock_acquire(s_pm_lock);
+    } else {
+        esp_pm_lock_release(s_pm_lock);
+    }
+}
+
 static volatile bool s_busy, s_cancel;
 static int s_timeout_s;
 static rfid_cb_t s_cb;
@@ -123,7 +139,7 @@ static void apply_cfg(int i)
         .parity = k_cfgs[i].parity,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
+        .source_clk = UART_SCLK_XTAL,   /* fixed 40 MHz: APB changes with DFS and would shift the baud rate */
     };
     uart_param_config(RFID_UART, &cfg);
     uart_set_line_inverse(RFID_UART, k_cfgs[i].inverted ? UART_SIGNAL_RXD_INV : UART_SIGNAL_INV_DISABLE);
@@ -169,6 +185,7 @@ static void detect_serial(void)
 
 static void rfid_task(void *arg)
 {
+    awake(true);
     uart_driver_install(RFID_UART, 512, 0, 0, NULL, 0);
     uart_set_pin(RFID_UART, UART_PIN_NO_CHANGE, BOARD_PIN_RFID_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (s_cfg < 0) {
@@ -226,6 +243,7 @@ static void rfid_task(void *arg)
     uart_driver_delete(RFID_UART);
     gpio_reset_pin(BOARD_PIN_RFID_RX);
     gpio_set_level(BOARD_PIN_RFID_EN, 0);
+    awake(false);
 
     if (done) {
         char s[16];

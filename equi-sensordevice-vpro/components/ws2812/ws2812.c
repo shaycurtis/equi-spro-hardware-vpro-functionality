@@ -46,7 +46,8 @@ esp_err_t ws2812_init(gpio_num_t gpio, uint32_t led_count)
         .flags.msb_first = 1,
     };
     ESP_RETURN_ON_ERROR(rmt_new_bytes_encoder(&enc_cfg, &s_enc), TAG, "encoder");
-    ESP_RETURN_ON_ERROR(rmt_enable(s_chan), TAG, "rmt enable");
+    /* The channel is enabled only while transmitting: an enabled RMT channel holds a
+     * power-management lock that would stop the chip from entering light sleep. */
     return ESP_OK;
 }
 
@@ -68,8 +69,13 @@ void ws2812_clear(void)
 esp_err_t ws2812_show(void)
 {
     rmt_transmit_config_t tx_cfg = { .loop_count = 0 };
-    ESP_RETURN_ON_ERROR(rmt_transmit(s_chan, s_enc, s_buf, s_count * 3, &tx_cfg), TAG, "tx");
-    ESP_RETURN_ON_ERROR(rmt_tx_wait_all_done(s_chan, 100), TAG, "tx wait");
+    ESP_RETURN_ON_ERROR(rmt_enable(s_chan), TAG, "rmt enable");
+    esp_err_t err = rmt_transmit(s_chan, s_enc, s_buf, s_count * 3, &tx_cfg);
+    if (err == ESP_OK) {
+        err = rmt_tx_wait_all_done(s_chan, 100);
+    }
     esp_rom_delay_us(RESET_US); /* line idles low = latch/reset */
+    rmt_disable(s_chan);
+    ESP_RETURN_ON_ERROR(err, TAG, "tx");
     return ESP_OK;
 }

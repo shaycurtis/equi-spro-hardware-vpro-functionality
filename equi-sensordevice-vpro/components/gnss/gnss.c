@@ -14,6 +14,22 @@
 #define LISTEN_MS      1300          /* NMEA is 1 Hz, so this always spans a burst */
 
 static const char *TAG = "gnss";
+#include "esp_pm.h"
+
+/* Held while this driver is active: light sleep would stop its clock mid-transfer. */
+static esp_pm_lock_handle_t s_pm_lock;
+static void awake(bool on)
+{
+    if (!s_pm_lock && esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, TAG, &s_pm_lock) != ESP_OK) {
+        return;   /* power management disabled */
+    }
+    if (on) {
+        esp_pm_lock_acquire(s_pm_lock);
+    } else {
+        esp_pm_lock_release(s_pm_lock);
+    }
+}
+
 
 static const int k_bauds[] = { BOARD_GPS_BAUD, 460800, 9600, 230400, 921600 };
 
@@ -66,8 +82,9 @@ static void gnss_task(void *arg)
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
+        .source_clk = UART_SCLK_XTAL,   /* fixed 40 MHz: APB changes with DFS and would shift the baud rate */
     };
+    awake(true);
     uart_driver_install(GNSS_UART, 1024, 0, 0, NULL, 0);
     uart_param_config(GNSS_UART, &cfg);
 
@@ -107,6 +124,7 @@ static void gnss_task(void *arg)
     uart_driver_delete(GNSS_UART);
     gpio_reset_pin(BOARD_PIN_GPS_TX);
     gpio_reset_pin(BOARD_PIN_GPS_RX);
+    awake(false);
     vTaskDelete(NULL);
 }
 

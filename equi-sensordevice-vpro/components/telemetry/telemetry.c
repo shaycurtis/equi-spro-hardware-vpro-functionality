@@ -32,11 +32,11 @@ void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN])
     put32(&out[5], t->session);
     out[9] = t->seq;
     out[10] = t->flags;
-    out[11] = t->battery_soc;
-    put16(&out[12], t->battery_mv);
-    put16(&out[14], (uint16_t)t->temp_c100);
-    out[16] = t->humidity_half;
-    put32(&out[17], t->steps);
+    put16(&out[11], t->battery_soc256);
+    put16(&out[13], t->battery_mv);
+    put16(&out[15], (uint16_t)t->temp_c100);
+    out[17] = t->humidity_half;
+    put32(&out[18], t->steps);
 }
 
 /* --------------------------------------------------------------------- BLE */

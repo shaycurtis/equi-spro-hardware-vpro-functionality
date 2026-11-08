@@ -289,17 +289,37 @@ void power_shutdown(void)
 
 /* -------------------------------------------------------------- run task */
 
+/*
+ * Automatic light sleep. By default ESP-IDF switches every GPIO to an isolated (floating)
+ * state during light sleep. On this board that would let PMIC_EN float and the TPS22810
+ * would cut the 3.3 V rail, so pins that control power or are wake inputs keep their
+ * normal configuration while asleep.
+ */
+static void sleep_pins_setup(void)
+{
+    const gpio_num_t keep[] = {
+        BOARD_PIN_PMIC_EN,   /* power latch (also pad-held) */
+        BOARD_PIN_VCC_CTRL,  /* MAX30001 1.8 V rails: must stay off */
+        BOARD_PIN_RFID_EN,   /* RFID power: must stay off (Q3 base would float) */
+        BOARD_PIN_MOTOR,
+        BOARD_PIN_BUZZER,
+        BOARD_PIN_LED,       /* WS2812 data stays low */
+        BOARD_PIN_PWR_BTN,   /* keeps its pull-down */
+        BOARD_PIN_SCAN_BTN,
+    };
+    for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++) {
+        gpio_sleep_sel_dis(keep[i]);
+    }
+    /* Buttons wake the chip from light sleep (level-triggered). */
+    gpio_wakeup_enable(BOARD_PIN_PWR_BTN, GPIO_INTR_HIGH_LEVEL);
+    gpio_wakeup_enable(BOARD_PIN_SCAN_BTN, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+}
+
 static void apply_charge_led(void)
 {
     status_led_set_mode(LED_IDX_CHARGE, s_charge == POWER_CHARGE_NO_USB ? LED_MODE_OFF : LED_MODE_SOLID,
                         charge_colour(s_charge));
-}
-
-static void IRAM_ATTR btn_isr(void *arg)
-{
-    BaseType_t woken = pdFALSE;
-    vTaskNotifyGiveFromISR(s_task, &woken);
-    portYIELD_FROM_ISR(woken);
 }
 
 static void power_task(void *arg)
@@ -365,8 +385,8 @@ void power_start(void)
     if (s_charge_led) {
         apply_charge_led();
     }
+    sleep_pins_setup();
+    /* The button is polled every TASK_PERIOD_MS (the level wake-up gets the chip out of light
+     * sleep while it is held), so no edge interrupt is needed. */
     xTaskCreate(power_task, "power", 3072, NULL, 10, &s_task);
-    gpio_set_intr_type(BOARD_PIN_PWR_BTN, GPIO_INTR_ANYEDGE);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(BOARD_PIN_PWR_BTN, btn_isr, NULL);
 }

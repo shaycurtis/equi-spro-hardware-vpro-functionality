@@ -46,6 +46,7 @@
   .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
   .horse { margin-top: 10px; font-size: 13px; }
   .horse b { letter-spacing: .03em; font-variant-numeric: tabular-nums; }
+  .drain { margin-top: 6px; font-size: 12px; }
   .rx { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
   .detail h2 { font-size: 16px; margin: 28px 0 12px; }
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 12px; }
@@ -145,6 +146,18 @@ function chargeLabel(d) {
   return ["on battery", css("--muted")];
 }
 
+function drainLine(x) {
+  if (!x || x.status === "no_session") return "";
+  if (x.status === "usb") return `<span class="muted">Battery drain: measured on battery only (USB connected)</span>`;
+  if (x.status === "measuring")
+    return `<span class="muted">Battery drain: measuring on battery (${x.span_min}/${x.need_min} min)</span>`;
+  if (x.status === "flat")
+    return `<span class="muted">Battery drain: below gauge resolution so far (${x.span_min} min on battery)</span>`;
+  const left = x.hours_left >= 48 ? `${(x.hours_left / 24).toFixed(1)} days` : `${x.hours_left.toFixed(1)} h`;
+  return `Battery drain <b>≈ ${x.ma.toFixed(1)} mA</b> · ~${left} left` +
+         `<span class="muted"> (${x.pct_per_h.toFixed(2)} %/h over ${x.span_min} min, ${x.battery_mah} mAh)</span>`;
+}
+
 function horseLine(d) {
   const h = d.horse_id || d.device_session_info?.horse_id;
   const horse = h ? `Horse <b>${h.slice(0, 3)} ${h.slice(3)}</b>` : `<span class="muted">No horse scanned</span>`;
@@ -188,7 +201,7 @@ function renderDevices(devs) {
         <span class="pill" style="color:${cc};border-color:${cc}">${cl}</span>
       </div>
       <div class="stats">
-        <div class="stat"><div class="v">${fmt(d.battery_soc, 0, "%")}</div><div class="l">${fmt(d.battery_mv, 0, " mV")}</div>
+        <div class="stat"><div class="v">${fmt(d.battery_soc, d.battery_soc % 1 ? 1 : 0, "%")}</div><div class="l">${fmt(d.battery_mv, 0, " mV")}</div>
           <div class="batt"><i style="width:${soc}%;background:${battColor}"></i></div></div>
         <div class="stat"><div class="v">${fmt(d.temp_c, 1, "°C")}</div><div class="l">board temp</div></div>
         <div class="stat"><div class="v">${fmt(d.humidity, 0, "%")}</div><div class="l">humidity</div></div>
@@ -197,6 +210,7 @@ function renderDevices(devs) {
         <div class="stat"><div class="v">${Math.floor(d.uptime_min / 60)}h${String(d.uptime_min % 60).padStart(2, "0")}</div><div class="l">uptime</div></div>
       </div>
       <div class="horse">${horseLine(d)}</div>
+      <div class="drain">${drainLine(d.drain)}</div>
       <div class="rx">Last seen ${ago(d.age_s)} · last hour: ${h.readings}/${h.expected} readings,
         ${fmt(h.adverts_per_burst, 1)} adverts/burst, avg RSSI ${fmt(h.rssi)} dBm</div>`;
     card.onclick = async () => { selected = d.device_id; localStorageSet("device", selected); ecgShown = null;

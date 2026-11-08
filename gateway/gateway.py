@@ -254,7 +254,7 @@ class Gateway:
         charge = "fault" if t.charger_fault else "charging" if t.charging else "full" if t.charge_full else (
             "usb" if t.usb else "battery")
         now = datetime.now().strftime("%H:%M:%S")
-        print(f"{now}  {t.device_id}  seq {t.seq:3d}  batt {f(t.battery_soc, 'd', '%')} {f(t.battery_mv, 'd', 'mV')}"
+        print(f"{now}  {t.device_id}  seq {t.seq:3d}  batt {f(t.battery_soc, '.1f', '%')} {f(t.battery_mv, 'd', 'mV')}"
               f"  {f(t.temp_c, '.2f', 'C')} {f(t.humidity, '.1f', '%RH')}  steps {f(t.steps, 'd')}"
               f"  {charge:8s}  {'RFID scan  ' if t.rfid_scanning else ''}horse {horse or '-'}  rssi {rssi} dBm")
 
@@ -279,6 +279,7 @@ async def main() -> None:
     ap.add_argument("--serial", metavar="COMx", help="read from the ESP32 receiver on this port instead of PC Bluetooth")
     ap.add_argument("--web", metavar="PORT", type=int, nargs="?", const=8080,
                     help="also serve the dashboard (default port 8080)")
+    ap.add_argument("--battery-mah", type=float, default=1500, help="battery capacity for drain/runtime estimates")
     args = ap.parse_args()
     if args.duration:
         asyncio.get_running_loop().call_later(args.duration, lambda: stop.set())
@@ -286,7 +287,7 @@ async def main() -> None:
     gw = Gateway(args.db, args.verbose)
     if args.web:
         from webapp import serve
-        serve(args.db, args.web, background=True, ecg=gw.ecg)
+        serve(args.db, args.web, background=True, ecg=gw.ecg, battery_mah=args.battery_mah)
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             asyncio.get_running_loop().add_signal_handler(sig, stop.set)

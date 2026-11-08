@@ -13,6 +13,22 @@
 #define POLL_MS          20     /* FIFO is 32 deep = 62 ms at 512 sps */
 
 static const char *TAG = "ecg";
+#include "esp_pm.h"
+
+/* Held while this driver is active: light sleep would stop its clock mid-transfer. */
+static esp_pm_lock_handle_t s_pm_lock;
+static void awake(bool on)
+{
+    if (!s_pm_lock && esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, TAG, &s_pm_lock) != ESP_OK) {
+        return;   /* power management disabled */
+    }
+    if (on) {
+        esp_pm_lock_acquire(s_pm_lock);
+    } else {
+        esp_pm_lock_release(s_pm_lock);
+    }
+}
+
 static volatile bool s_busy;
 static volatile bool s_stop;
 static ecg_request_t s_req;
@@ -31,6 +47,7 @@ static void ecg_task(void *arg)
     int32_t raw[32];
     esp_err_t status = ESP_OK;
 
+    awake(true);
     rail(true);
     vTaskDelay(pdMS_TO_TICKS(RAIL_SETTLE_MS));
 
@@ -70,6 +87,7 @@ static void ecg_task(void *arg)
 
     max30001_stop();
     rail(false);
+    awake(false);
     ESP_LOGI(TAG, "capture done: %lu samples in %lld ms (%.1f sps), %lu FIFO overflows, status %s",
              (unsigned long)total, dt_ms, dt_ms ? total * 1000.0 / dt_ms : 0.0,
              (unsigned long)overflows, esp_err_to_name(status));

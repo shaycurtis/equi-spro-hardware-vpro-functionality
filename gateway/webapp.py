@@ -31,6 +31,48 @@ DEFAULT_DB = HERE / "data" / "telemetry.db"
 SAMPLE_PERIOD_S = 30
 MAX_POINTS = 720          # above this, average into time buckets
 MAX_GAP = 120             # within one gateway run + device boot, gaps up to 1 h are radio losses
+BATTERY_MAH = 1500.0      # overridden by serve(battery_mah=...)
+DRAIN_WINDOW_S = 6 * 3600 # fit the battery trend over at most the last 6 h of the session
+DRAIN_MIN_SPAN_S = 1800   # need 30 min on battery before reporting a drain estimate
+
+
+def drain_estimate(db: Path, device: str, session) -> dict:
+    """Battery drain from the MAX17048 state of charge: least-squares slope of SoC vs time over
+    the session's battery-only readings (USB connected = charging, not counted)."""
+    if session is None:
+        return {"status": "no_session"}
+    now = int(datetime.now(timezone.utc).timestamp())
+    rows = query(db, f"""
+        SELECT {EPOCH} AS t, battery_soc AS soc, usb FROM readings
+        WHERE device_id = ? AND device_session = ? AND {EPOCH} >= ? AND battery_soc IS NOT NULL
+        ORDER BY id""", (device, session, now - DRAIN_WINDOW_S))
+    if rows and rows[-1]["usb"]:
+        return {"status": "usb"}
+    # Only the most recent unbroken stretch on battery.
+    run = []
+    for r in reversed(rows):
+        if r["usb"]:
+            break
+        run.append(r)
+    run.reverse()
+    span = run[-1]["t"] - run[0]["t"] if len(run) > 1 else 0
+    if span < DRAIN_MIN_SPAN_S or len(run) < 10:
+        return {"status": "measuring", "span_min": round(span / 60), "need_min": DRAIN_MIN_SPAN_S // 60}
+    n = len(run)
+    mt = sum(r["t"] for r in run) / n
+    ms = sum(r["soc"] for r in run) / n
+    sxx = sum((r["t"] - mt) ** 2 for r in run)
+    sxy = sum((r["t"] - mt) * (r["soc"] - ms) for r in run)
+    pct_per_h = -(sxy / sxx) * 3600 if sxx else 0.0      # positive = discharging
+    soc_now = run[-1]["soc"]
+    out = {"status": "ok", "span_min": round(span / 60), "points": n, "pct_per_h": round(pct_per_h, 3),
+           "soc": soc_now, "battery_mah": BATTERY_MAH}
+    if pct_per_h <= 0.01:
+        out["status"] = "flat"   # within gauge noise: drain too small to resolve yet
+        return out
+    out["ma"] = round(pct_per_h / 100.0 * BATTERY_MAH, 2)
+    out["hours_left"] = round(soc_now / pct_per_h, 1)
+    return out
 
 EPOCH = "CAST(strftime('%s', received_at) AS INTEGER)"
 
@@ -82,6 +124,7 @@ def api_devices(db: Path) -> list[dict]:
         sess = query(db, "SELECT started_at, horse_id, readings FROM device_sessions WHERE device_id = ? AND session_id = ?",
                      (d["device_id"], ds)) if ds is not None else []
         d["device_session_info"] = sess[0] if sess else None
+        d["drain"] = drain_estimate(db, d["device_id"], ds)
         d["online"] = d["age_s"] < 3 * SAMPLE_PERIOD_S
         d["hour"] = {
             "readings": s["n"],
@@ -249,7 +292,10 @@ def make_handler(db: Path, ecg=None):
     return Handler
 
 
-def serve(db: Path = DEFAULT_DB, port: int = 8080, host: str = "127.0.0.1", background: bool = False, ecg=None):
+def serve(db: Path = DEFAULT_DB, port: int = 8080, host: str = "127.0.0.1", background: bool = False, ecg=None,
+          battery_mah: float = 1500.0):
+    global BATTERY_MAH
+    BATTERY_MAH = float(battery_mah)
     httpd = ThreadingHTTPServer((host, port), make_handler(db, ecg))
     print(f"Web app: http://localhost:{port}")
     if background:
