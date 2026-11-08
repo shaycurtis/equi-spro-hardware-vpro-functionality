@@ -48,8 +48,9 @@ CREATE TABLE IF NOT EXISTS readings (
     rssi_best     INTEGER,
     packets       INTEGER,              -- adverts heard in this burst (range indicator)
     address       TEXT,
-    session       INTEGER,              -- gateway run (start time); loss stats only compare within one
-    UNIQUE (device_id, seq, uptime_min)
+    session       INTEGER               -- gateway run (start time); loss stats only compare within one
+    -- No UNIQUE key: seq and uptime restart at every device boot, so they are not unique over
+    -- time. Duplicate adverts within a burst are merged in memory before insert.
 );
 CREATE INDEX IF NOT EXISTS idx_readings_dev_time ON readings (device_id, received_at);
 """
@@ -74,12 +75,31 @@ class Gateway:
             self.db.execute("ALTER TABLE readings ADD COLUMN session INTEGER")
         except sqlite3.OperationalError:
             pass
+        self._drop_old_unique_key()
         self.session = int(time.time())
         self.verbose = verbose
         self.lock = threading.Lock()   # the DB connection is shared with web-request threads
         self.ecg = EcgManager(self.db, self.lock)
         self.current: dict[str, tuple[int, int, int]] = {}   # device -> (seq, uptime, row id)
         self.stats: dict[str, DeviceStats] = {}
+
+    def _drop_old_unique_key(self) -> None:
+        """Early databases had UNIQUE(device_id, seq, uptime_min), which silently dropped readings
+        after a device reboot. Rebuild the table without it, keeping all rows."""
+        sql = self.db.execute("SELECT sql FROM sqlite_master WHERE name = 'readings'").fetchone()[0]
+        if "UNIQUE (device_id, seq, uptime_min)" not in sql:
+            return
+        cols = [r[1] for r in self.db.execute("PRAGMA table_info(readings)")]
+        names = ", ".join(cols)
+        self.db.executescript(f"""
+            BEGIN;
+            ALTER TABLE readings RENAME TO readings_old;
+            {SCHEMA}
+            INSERT INTO readings ({names}) SELECT {names} FROM readings_old;
+            DROP TABLE readings_old;
+            COMMIT;""")
+        self.db.executescript(SCHEMA)   # the index moved with the renamed table; recreate it
+        print("database: removed the old (device, seq, uptime) unique key from 'readings'")
 
     def on_advert(self, device: BLEDevice, adv: AdvertisementData) -> None:
         """bleak callback (PC Bluetooth)."""
@@ -148,7 +168,7 @@ class Gateway:
 
     def _insert(self, t: Telemetry, r: dict, rssi: int, address: str) -> int:
         cur = self.db.execute(
-            """INSERT OR IGNORE INTO readings
+            """INSERT INTO readings
                (received_at, device_id, seq, uptime_min, battery_soc, battery_mv, temp_c, humidity,
                 steps, usb, charging, charge_full, charger_fault, rtc_valid, rssi_best, packets, address, session)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
