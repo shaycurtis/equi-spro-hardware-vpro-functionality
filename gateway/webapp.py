@@ -6,10 +6,15 @@
 JSON API (kept small and storage-agnostic so it can later front AWS instead of SQLite):
     GET /api/devices                       latest reading + last-hour reception stats per device
     GET /api/readings?device=ID&hours=N    time series (bucket-averaged for long ranges)
+    POST /api/ecg {device, seconds, test}  request an on-demand ECG capture (gateway --serial --web only)
+    GET /api/ecg/status?id=N               progress of a capture
+    GET /api/ecg/list?device=ID            recent captures (metadata)
+    GET /api/ecg/capture?id=N              one capture with samples in mV
 """
 from __future__ import annotations
 
 import argparse
+import array
 import json
 import sqlite3
 import threading
@@ -110,7 +115,30 @@ def api_readings(db: Path, device: str, hours: float) -> dict:
             "rows": rows}
 
 
-def make_handler(db: Path):
+def api_ecg_list(db: Path, device: str) -> list[dict]:
+    return query(db, """
+        SELECT id, device_id, requested_at, completed_at, seconds, test_signal, status, detail,
+               sample_rate, n_samples, missing, overflows
+        FROM ecg_captures WHERE device_id = ? ORDER BY id DESC LIMIT 20""", (device,))
+
+
+def api_ecg_capture(db: Path, cap_id: int) -> dict | None:
+    rows = query(db, "SELECT * FROM ecg_captures WHERE id = ?", (cap_id,))
+    if not rows:
+        return None
+    r = rows[0]
+    blob = r.pop("samples")
+    uv = r.get("uv_per_lsb") or 0
+    if blob and uv:
+        vals = array.array("h")
+        vals.frombytes(blob)
+        r["mv"] = [round(v * uv / 1000.0, 4) for v in vals]
+    else:
+        r["mv"] = []
+    return r
+
+
+def make_handler(db: Path, ecg=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):   # keep the gateway console readable
             pass
@@ -122,6 +150,26 @@ def make_handler(db: Path):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def send_json(self, code: int, obj) -> None:
+            self.send(code, json.dumps(obj).encode(), "application/json")
+
+        def do_POST(self):
+            url = urlparse(self.path)
+            try:
+                if url.path != "/api/ecg":
+                    return self.send(404, b"not found", "text/plain")
+                if ecg is None:
+                    return self.send_json(503, {"error": "ECG capture needs the gateway: "
+                                                         "python gateway.py --serial COMx --web"})
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
+                try:
+                    cap = ecg.request(str(body["device"]), int(body.get("seconds", 10)), bool(body.get("test", False)))
+                except RuntimeError as e:
+                    return self.send_json(409, {"error": str(e)})
+                self.send_json(200, cap)
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
 
         def do_GET(self):
             url = urlparse(self.path)
@@ -135,6 +183,19 @@ def make_handler(db: Path):
                     dev = q.get("device", [""])[0]
                     hours = min(24 * 30, max(0.1, float(q.get("hours", ["6"])[0])))
                     self.send(200, json.dumps(api_readings(db, dev, hours)).encode(), "application/json")
+                elif url.path == "/api/ecg/status":
+                    cid = int(q.get("id", ["0"])[0])
+                    st = ecg.status(cid) if ecg else None
+                    if st is None:
+                        rows = query(db, "SELECT id, device_id, status, detail, seconds, test_signal, n_samples "
+                                         "AS received FROM ecg_captures WHERE id = ?", (cid,))
+                        st = rows[0] if rows else None
+                    self.send_json(200 if st else 404, st or {"error": "unknown capture"})
+                elif url.path == "/api/ecg/list":
+                    self.send_json(200, api_ecg_list(db, q.get("device", [""])[0]))
+                elif url.path == "/api/ecg/capture":
+                    cap = api_ecg_capture(db, int(q.get("id", ["0"])[0]))
+                    self.send_json(200 if cap else 404, cap or {"error": "unknown capture"})
                 else:
                     self.send(404, b"not found", "text/plain")
             except Exception as e:   # never take the gateway down because of a bad request
@@ -143,8 +204,8 @@ def make_handler(db: Path):
     return Handler
 
 
-def serve(db: Path = DEFAULT_DB, port: int = 8080, host: str = "127.0.0.1", background: bool = False):
-    httpd = ThreadingHTTPServer((host, port), make_handler(db))
+def serve(db: Path = DEFAULT_DB, port: int = 8080, host: str = "127.0.0.1", background: bool = False, ecg=None):
+    httpd = ThreadingHTTPServer((host, port), make_handler(db, ecg))
     print(f"Web app: http://localhost:{port}")
     if background:
         threading.Thread(target=httpd.serve_forever, daemon=True).start()

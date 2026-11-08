@@ -7,6 +7,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
+#include "ecg_service.h"
 
 static const char *TAG = "telemetry";
 
@@ -61,7 +62,27 @@ static void host_task(void *arg)
 
 static int gap_event(struct ble_gap_event *ev, void *arg)
 {
-    return 0;   /* nothing to do for non-connectable bursts (adv complete is expected) */
+    switch (ev->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (ev->connect.status == 0) {
+            ESP_LOGI(TAG, "gateway connected (handle %d)", ev->connect.conn_handle);
+            ecg_service_on_connect(ev->connect.conn_handle);
+        }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "gateway disconnected (reason 0x%x)", ev->disconnect.reason);
+        ecg_service_on_disconnect(ev->disconnect.conn.conn_handle);
+        break;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ecg_service_on_subscribe(ev->subscribe.conn_handle, ev->subscribe.attr_handle, ev->subscribe.cur_notify);
+        break;
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG, "MTU %d", ev->mtu.value);
+        break;
+    default:
+        break;   /* ADV_COMPLETE at the end of each burst is expected */
+    }
+    return 0;
 }
 
 esp_err_t telemetry_ble_init(const char *name)
@@ -75,6 +96,12 @@ esp_err_t telemetry_ble_init(const char *name)
     ble_hs_cfg.reset_cb = on_reset;
     ble_svc_gap_init();
     ble_svc_gap_device_name_set(name);
+    int rc = ecg_service_register();
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ECG service register rc=%d", rc);
+        return ESP_FAIL;
+    }
+    ble_att_set_preferred_mtu(247);
     nimble_port_freertos_init(host_task);
     return ESP_OK;
 }
@@ -105,7 +132,7 @@ esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int 
         return ESP_FAIL;
     }
     struct ble_gap_adv_params p = {
-        .conn_mode = BLE_GAP_CONN_MODE_NON,
+        .conn_mode = BLE_GAP_CONN_MODE_UND,    /* connectable: the gateway connects for ECG / time */
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
         .itvl_min = BLE_GAP_ADV_ITVL_MS(100),
         .itvl_max = BLE_GAP_ADV_ITVL_MS(100),

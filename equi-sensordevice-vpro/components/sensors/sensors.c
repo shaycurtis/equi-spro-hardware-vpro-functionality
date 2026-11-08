@@ -1,6 +1,7 @@
 #include "sensors.h"
 #include "sensors_priv.h"
 #include "i2c_bus.h"
+#include <sys/time.h>
 #include "esp_log.h"
 
 static const char *TAG = "sensors";
@@ -35,6 +36,24 @@ void sensors_read(sensor_sample_t *s)
     s->th_ok  = s_th  && shtc3_read(&s->temp_c, &s->rh) == ESP_OK;
     s->imu_ok = s_imu && lsm6dsox_read_steps(&s->steps) == ESP_OK;
     s->rtc_ok = s_rtc && pcf85063_read(&s->rtc_time, &s->rtc_valid) == ESP_OK;
+}
+
+esp_err_t sensors_set_time(uint32_t epoch_utc)
+{
+    if (!s_rtc) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    time_t t = (time_t)epoch_utc;
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    esp_err_t err = pcf85063_write(&tm);
+    if (err == ESP_OK) {
+        struct timeval tv = { .tv_sec = t };
+        settimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "RTC + system time set to %04d-%02d-%02d %02d:%02d:%02d UTC", tm.tm_year + 1900,
+                 tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    }
+    return err;
 }
 
 void sensors_shutdown(void)

@@ -2,7 +2,7 @@
 /*
  * Telemetry advert, format version 1.
  *
- * Sent as BLE legacy, non-connectable advertising (1M PHY) so any scanner or
+ * Sent as BLE legacy, connectable advertising (1M PHY; the gateway connects only for ECG / time-set) so any scanner or
  * commercial gateway can forward it. The AD structure is Manufacturer Specific Data
  * (type 0xFF) with company ID 0xFFFF (Bluetooth SIG "test / not assigned" - replace
  * with an Equimetrics company ID for production).

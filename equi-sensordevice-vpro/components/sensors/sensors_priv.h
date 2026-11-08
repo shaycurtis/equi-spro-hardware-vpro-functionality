@@ -20,3 +20,4 @@ void lsm6dsox_power_down(void);
 /* PCF85063A */
 esp_err_t pcf85063_init(void);
 esp_err_t pcf85063_read(struct tm *t, bool *valid);
+esp_err_t pcf85063_write(const struct tm *t);

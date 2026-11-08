@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import signal
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from ecg_manager import EcgManager
 from equi_protocol import COMPANY_ID, Telemetry, decode
 
 SCHEMA = """
@@ -74,6 +76,8 @@ class Gateway:
             pass
         self.session = int(time.time())
         self.verbose = verbose
+        self.lock = threading.Lock()   # the DB connection is shared with web-request threads
+        self.ecg = EcgManager(self.db, self.lock)
         self.current: dict[str, tuple[int, int, int]] = {}   # device -> (seq, uptime, row id)
         self.stats: dict[str, DeviceStats] = {}
 
@@ -91,6 +95,10 @@ class Gateway:
                 self.handle(parts[1], int(parts[2]), bytes.fromhex(parts[3]))
             except ValueError:
                 pass
+        elif parts[0] == "EQECGD" and len(parts) == 3:
+            self.ecg.on_data(parts[1], parts[2])
+        elif parts[0] == "EQECG" and len(parts) >= 3:
+            self.ecg.on_event(parts[1], parts[2], parts[3] if len(parts) > 3 else "")
         elif parts[0] == "EQRX":
             print("receiver ready")
         elif parts[0] == "EQHB" and self.verbose:
@@ -102,6 +110,7 @@ class Gateway:
             return
         if self.verbose:
             print(f"  adv {t.device_id} seq={t.seq} rssi={rssi}")
+        self.ecg.addresses[t.device_id] = address
 
         key = (t.seq, t.uptime_min)
         cur = self.current.get(t.device_id)
@@ -110,11 +119,12 @@ class Gateway:
             # Another advert from the same burst: update reception stats only.
             st.packets += 1
             st.rssi.append(rssi)
-            self.db.execute(
-                "UPDATE readings SET packets = packets + 1, rssi_best = MAX(rssi_best, ?) WHERE id = ?",
-                (rssi, cur[2]),
-            )
-            self.db.commit()
+            with self.lock:
+                self.db.execute(
+                    "UPDATE readings SET packets = packets + 1, rssi_best = MAX(rssi_best, ?) WHERE id = ?",
+                    (rssi, cur[2]),
+                )
+                self.db.commit()
             return
 
         # New burst = new reading.
@@ -133,6 +143,10 @@ class Gateway:
 
     def store(self, t: Telemetry, rssi: int, address: str) -> int:
         r = t.to_record()
+        with self.lock:
+            return self._insert(t, r, rssi, address)
+
+    def _insert(self, t: Telemetry, r: dict, rssi: int, address: str) -> int:
         cur = self.db.execute(
             """INSERT OR IGNORE INTO readings
                (received_at, device_id, seq, uptime_min, battery_soc, battery_mv, temp_c, humidity,
@@ -186,7 +200,7 @@ async def main() -> None:
     gw = Gateway(args.db, args.verbose)
     if args.web:
         from webapp import serve
-        serve(args.db, args.web, background=True)
+        serve(args.db, args.web, background=True, ecg=gw.ecg)
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             asyncio.get_running_loop().add_signal_handler(sig, stop.set)
@@ -218,6 +232,7 @@ async def run_serial(gw: Gateway, port: str, stop: asyncio.Event, summaries) -> 
     import serial   # pyserial; only needed in this mode
 
     ser = serial.Serial(port, 115200, timeout=0.5)
+    gw.ecg.serial = ser   # lets the web app request ECG captures through the receiver
     loop = asyncio.get_running_loop()
     summary_task = asyncio.create_task(summaries)
     try:

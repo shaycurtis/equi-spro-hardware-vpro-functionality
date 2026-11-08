@@ -34,5 +34,8 @@ esp_err_t sensors_init(void);
 
 void sensors_read(sensor_sample_t *s);
 
+/* Set the RTC (and the ESP32 system clock) from a UTC Unix timestamp. */
+esp_err_t sensors_set_time(uint32_t epoch_utc);
+
 /* Put sensors into their lowest-power state (power-off / charge-only). */
 void sensors_shutdown(void);

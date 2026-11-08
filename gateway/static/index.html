@@ -51,6 +51,19 @@
   .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
   .chart h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
   .chart .box { position: relative; height: 220px; }
+  .ecgcard { grid-column: 1 / -1; }
+  .ecg-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  .ecg-ctl { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+  .ecg-ctl select, .btn { border: 1px solid var(--line); background: var(--panel); color: var(--text);
+                          padding: 5px 10px; border-radius: 6px; font: inherit; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; cursor: pointer; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .ecgcard .box { height: 260px; }
+  #ecgStatus { margin: 4px 0 8px; min-height: 1.4em; }
+  .ecglist { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .ecglist button { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px;
+                    padding: 3px 8px; font: 12px/1.4 inherit; cursor: pointer; }
+  .ecglist button.on { border-color: var(--accent); color: var(--accent); }
   .empty { padding: 40px; text-align: center; color: var(--muted); background: var(--panel);
            border: 1px dashed var(--line); border-radius: 10px; }
 </style>
@@ -70,6 +83,19 @@
       <div class="chart"><h3>Temperature &amp; humidity</h3><div class="box"><canvas id="chEnv"></canvas></div></div>
       <div class="chart"><h3>Activity (steps per interval)</h3><div class="box"><canvas id="chSteps"></canvas></div></div>
       <div class="chart"><h3>Reception (best RSSI and adverts heard per burst)</h3><div class="box"><canvas id="chRx"></canvas></div></div>
+      <div class="chart ecgcard">
+        <div class="ecg-head">
+          <h3>ECG on demand</h3>
+          <div class="ecg-ctl">
+            <select id="ecgSecs" aria-label="Capture length"><option value="5">5 s</option><option value="10" selected>10 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
+            <label><input type="checkbox" id="ecgTest"> internal test signal</label>
+            <button class="btn primary" id="ecgBtn">Capture ECG</button>
+          </div>
+        </div>
+        <div id="ecgStatus" class="muted">The device is contacted on its next advert (within 30 s), then streams the capture.</div>
+        <div class="box"><canvas id="chEcg"></canvas></div>
+        <div class="ecglist" id="ecgList"></div>
+      </div>
     </div>
   </section>
 </main>
@@ -142,7 +168,8 @@ function renderDevices(devs) {
       </div>
       <div class="rx">Last seen ${ago(d.age_s)} · last hour: ${h.readings}/${h.expected} readings,
         ${fmt(h.adverts_per_burst, 1)} adverts/burst, avg RSSI ${fmt(h.rssi)} dBm</div>`;
-    card.onclick = () => { selected = d.device_id; localStorageSet("device", selected); renderDevices(devs); loadDetail(); };
+    card.onclick = () => { selected = d.device_id; localStorageSet("device", selected); ecgShown = null;
+                           renderDevices(devs); loadDetail(); loadEcgList(); };
     el.appendChild(card);
   }
 }
@@ -220,6 +247,79 @@ async function loadDetail() {
          y1: { position: "right", min: 0, max: 22, title: { display: true, text: "adverts", color: css("--muted") } } });
 }
 
+let ecgShown = null;
+let ecgPolling = false;
+
+async function loadEcgList() {
+  if (!selected) return;
+  const list = await (await fetch(`/api/ecg/list?device=${encodeURIComponent(selected)}`)).json();
+  const el = document.getElementById("ecgList");
+  el.innerHTML = "";
+  for (const c of list) {
+    const b = document.createElement("button");
+    const when = new Date(c.requested_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    b.textContent = `#${c.id} ${when} · ${c.seconds}s${c.test_signal ? " test" : ""} · ${c.status}`;
+    b.className = c.id === ecgShown ? "on" : "";
+    b.disabled = c.status !== "done";
+    b.title = c.detail || "";
+    b.onclick = () => showCapture(c.id);
+    el.appendChild(b);
+  }
+  if (ecgShown === null && list.length && list[0].status === "done") showCapture(list[0].id);
+}
+
+async function showCapture(id) {
+  const c = await (await fetch(`/api/ecg/capture?id=${id}`)).json();
+  ecgShown = id;
+  const rate = c.sample_rate || 512;
+  const data = c.mv.map((v, i) => ({ x: i / rate, y: v }));
+  if (charts.chEcg) charts.chEcg.destroy();
+  const grid = { color: css("--line") }, ticks = { color: css("--muted") };
+  charts.chEcg = new Chart(document.getElementById("chEcg"), {
+    type: "line",
+    data: { datasets: [{ label: `ECG #${id} (mV)`, data, borderColor: css("--bad"), borderWidth: 1.2, pointRadius: 0 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false, parsing: false, normalized: true,
+      plugins: { legend: { labels: { color: css("--text"), boxWidth: 12 } },
+                 tooltip: { callbacks: { title: (it) => `${it[0].parsed.x.toFixed(3)} s` } } },
+      scales: { x: { type: "linear", min: 0, max: data.length / rate, grid, ticks: { ...ticks, callback: (v) => `${v}s` } },
+                y: { grid, ticks, title: { display: true, text: "mV", color: css("--muted") } } },
+    },
+  });
+  const lost = c.missing ? `, ${c.missing} samples lost` : "";
+  document.getElementById("ecgStatus").textContent =
+    `#${id}: ${c.n_samples} samples at ${rate} sps (${(c.n_samples / rate).toFixed(1)} s)${lost}` +
+    `${c.test_signal ? " · internal test signal" : ""} · captured ${new Date(c.requested_at).toLocaleString()}`;
+  loadEcgList();
+}
+
+async function requestEcg() {
+  const btn = document.getElementById("ecgBtn");
+  const status = document.getElementById("ecgStatus");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/ecg", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device: selected, seconds: Number(document.getElementById("ecgSecs").value),
+                             test: document.getElementById("ecgTest").checked }) });
+    const body = await res.json();
+    if (!res.ok) { status.textContent = body.error || `error ${res.status}`; btn.disabled = false; return; }
+    ecgPolling = true;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 1000));
+      const st = await (await fetch(`/api/ecg/status?id=${body.id}`)).json();
+      const pct = st.expected ? ` ${Math.round(100 * st.received / st.expected)}%` : "";
+      status.textContent = `#${body.id}: ${st.status}${st.status === "recording" ? pct : ""} · ${st.detail}`;
+      if (st.status === "done") { await showCapture(body.id); break; }
+      if (st.status === "failed") { loadEcgList(); break; }
+    }
+  } catch (e) {
+    status.textContent = `request failed: ${e.message}`;
+  }
+  ecgPolling = false;
+  btn.disabled = false;
+}
+document.getElementById("ecgBtn").onclick = requestEcg;
+
 async function refresh() {
   try {
     const devs = await (await fetch("/api/devices")).json();
@@ -232,7 +332,7 @@ async function refresh() {
 }
 
 renderRanges();
-refresh();
+refresh().then(loadEcgList);
 setInterval(refresh, REFRESH_MS);
 </script>
 </body>

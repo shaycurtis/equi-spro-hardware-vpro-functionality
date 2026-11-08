@@ -14,6 +14,7 @@
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "device_id.h"
+#include "ecg.h"
 #include "gnss.h"
 #include "power.h"
 #include "sensors.h"
@@ -24,6 +25,25 @@
 #define ADV_BURST_MS     2000   /* 20 adverts at 100 ms; tune down once gateway reception is known */
 
 static const char *TAG = "main";
+
+/* Temporary bring-up check: 3 s capture of the MAX30001 internal 1 Hz test signal at boot. */
+#define ECG_BOOT_SELFTEST 0
+
+#if ECG_BOOT_SELFTEST
+static void selftest_block(const int16_t *s, size_t n, uint32_t first, void *ctx)
+{
+    int32_t mn = INT16_MAX, mx = INT16_MIN;
+    int64_t sum = 0;
+    for (size_t i = 0; i < n; i++) {
+        mn = s[i] < mn ? s[i] : mn;
+        mx = s[i] > mx ? s[i] : mx;
+        sum += s[i];
+    }
+    ESP_LOGI("ecg_test", "[%5lu] n=%3u  min %6ld  max %6ld  mean %6lld  (%+.0f .. %+.0f uV)",
+             (unsigned long)first, (unsigned)n, (long)mn, (long)mx, sum / (int64_t)n,
+             mn * ECG_UV_PER_LSB, mx * ECG_UV_PER_LSB);
+}
+#endif
 
 static void confirm_ota_image(void)
 {
@@ -130,6 +150,12 @@ void app_main(void)
     snprintf(name, sizeof(name), "EQ-%s", device_id_get());
     ESP_ERROR_CHECK(telemetry_ble_init(name));
     power_register_shutdown_cb(telemetry_ble_stop);
+    power_register_shutdown_cb(ecg_shutdown);
+
+#if ECG_BOOT_SELFTEST
+    ecg_request_t req = { .seconds = 3, .test_signal = true, .on_block = selftest_block };
+    ESP_ERROR_CHECK(ecg_start(&req));
+#endif
 
     xTaskCreate(sample_task, "sample", 4096, NULL, 5, NULL);
 }

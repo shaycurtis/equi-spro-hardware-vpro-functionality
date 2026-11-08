@@ -22,6 +22,23 @@ esp_err_t pcf85063_init(void)
     return ESP_OK;
 }
 
+static uint8_t tobcd(int v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
+
+esp_err_t pcf85063_write(const struct tm *t)
+{
+    uint8_t b[8] = {
+        REG_SECONDS,
+        tobcd(t->tm_sec) & 0x7f,     /* writing seconds clears OS (time valid again) */
+        tobcd(t->tm_min),
+        tobcd(t->tm_hour),
+        tobcd(t->tm_mday),
+        (uint8_t)(t->tm_wday & 0x07),
+        tobcd(t->tm_mon + 1),
+        tobcd(t->tm_year - 100),
+    };
+    return i2c_master_transmit(s_dev, b, sizeof(b), 50);
+}
+
 esp_err_t pcf85063_read(struct tm *t, bool *valid)
 {
     uint8_t r[7];   /* seconds, minutes, hours, days, weekdays, months, years */
