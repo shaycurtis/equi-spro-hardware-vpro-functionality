@@ -111,10 +111,15 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
   if it recurs.
 - **Gateway receipt (green heartbeat):** the advert is plain legacy ADV_IND (any gateway receives it),
   sent through NimBLE's extended-advertising API only so the controller reports scan requests. An
-  actively scanning gateway sends one per advert it hears; that is the receipt. Requirements for a
-  commercial gateway: **active scanning**, and a public or static-random address (phones' rotating
-  private addresses are ignored). A passive-scanning gateway still gets all the data; D1 just stays blue.
-  "Connected" = a scan request within the last ~65 s (two bursts).
+  actively scanning gateway sends one per advert it hears; that is the receipt. Other scanners do too
+  (a smart-home hub here, `DC:73:06:…`, scans ~10x per burst), so only **learned gateways** count: a
+  central that connects and writes a control command (time set, ECG, or `PAIR 0x20`) is stored in NVS
+  (namespace `vpro`, up to 4, most recent first). When no trusted gateway has heard the device for
+  ~65 s it sets advert flag bit 6 (`NO_GATEWAY`); the PC gateway then connects and sets the time,
+  which pairs it (rate-limited to once per 2 min per device). Verified: pairs on the first burst,
+  goes blue ~60-90 s after the receiver is unplugged, green again on the next burst when it returns.
+  **Commercial gateway requirements:** active scanning, plus the ability to connect and write one
+  characteristic when it sees flag bit 6. A passive / non-connecting gateway still gets all the data.
 - **Gateway DB**: readings are not unique by (seq, uptime); de-dup is in memory per burst. Session
   losses are only counted within one gateway run + one device session.
 

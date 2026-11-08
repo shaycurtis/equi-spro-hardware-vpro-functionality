@@ -41,3 +41,10 @@ API: `GET /api/devices`, `/api/sessions?device=`, `/api/readings?device=&hours=|
 
 The API is deliberately small and storage-agnostic, so the same dashboard can later sit
 in front of AWS (e.g. gateway publishes `Telemetry.to_record()` to MQTT / IoT Core).
+
+## Gateway pairing (green heartbeat on the device)
+
+Adverts with flag bit 6 (`no_gateway`) mean no trusted gateway has heard the device recently. The
+gateway then connects through the receiver and sets the device clock (`ECG,<addr>,0,0,<epoch>`),
+at most every 2 minutes per device. Any successful command write makes the device trust this
+gateway, and its scan requests then turn the device's 5 s heartbeat green.
