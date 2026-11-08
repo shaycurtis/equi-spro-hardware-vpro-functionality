@@ -317,7 +317,13 @@ async def main() -> None:
 async def run_serial(gw: Gateway, port: str, stop: asyncio.Event, summaries) -> None:
     import serial   # pyserial; only needed in this mode
 
-    ser = serial.Serial(port, 115200, timeout=0.5)
+    try:
+        ser = serial.Serial(port, 115200, timeout=0.5)
+    except serial.SerialException as e:
+        summaries.close()
+        raise SystemExit(f"\nCannot open {port}: {e}\n"
+                         f"Is another program using it (another gateway, a serial monitor, idf.py monitor)? "
+                         f"Close it and try again.")
     gw.ecg.serial = ser   # lets the web app request ECG captures through the receiver
     loop = asyncio.get_running_loop()
     summary_task = asyncio.create_task(summaries)
