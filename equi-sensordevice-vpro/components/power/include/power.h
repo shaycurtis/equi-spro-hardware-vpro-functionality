@@ -24,6 +24,9 @@
  */
 #include <stdbool.h>
 
+/* 1: plugging USB in while running on battery ends the session and enters charge-only
+ * (booting while already on USB keeps running, for bench work). */
+#define POWER_AUTO_STOP_ON_USB 1
 #define POWER_HOLD_ON_MS     1200   /* measured from firmware start (~300 ms after press) */
 #define POWER_HOLD_OFF_MS    2000
 #define POWER_CHARGE_POLL_S  10

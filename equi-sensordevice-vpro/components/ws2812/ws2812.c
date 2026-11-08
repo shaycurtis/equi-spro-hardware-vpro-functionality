@@ -70,6 +70,14 @@ esp_err_t ws2812_show(void)
 {
     rmt_transmit_config_t tx_cfg = { .loop_count = 0 };
     ESP_RETURN_ON_ERROR(rmt_enable(s_chan), TAG, "rmt enable");
+    /*
+     * Reset period BEFORE the frame too. The data line can glitch while the chip is in light
+     * sleep / waking (the RMT is unclocked). If a frame follows the glitch within the reset
+     * time, the LED counts the glitch as a "1" bit and the whole frame shifts by one bit:
+     * an all-off frame then shows as half-brightness green on D1 until the next frame.
+     * Holding the line low for a full reset first makes the LED discard any partial bits.
+     */
+    esp_rom_delay_us(RESET_US);
     esp_err_t err = rmt_transmit(s_chan, s_enc, s_buf, s_count * 3, &tx_cfg);
     if (err == ESP_OK) {
         err = rmt_tx_wait_all_done(s_chan, 100);

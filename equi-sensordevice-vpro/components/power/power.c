@@ -20,6 +20,7 @@ static const char *TAG = "power";
 #define DEBOUNCE_MS          50
 #define TASK_PERIOD_MS       250
 #define FAULT_WINDOW_MS      3000
+#define USB_STOP_DEBOUNCE_MS 2000   /* USB must stay present this long before auto-stop */
 
 /* Survives software/panic/watchdog resets (not power-on): was the latch on? */
 static RTC_NOINIT_ATTR uint32_t s_latched_magic;
@@ -326,6 +327,7 @@ static void power_task(void *arg)
 {
     chg_trk_t trk = { .last = -1 };
     bool armed = false;   /* ignore the press that powered us on until it's released */
+    int64_t usb_since = -1;   /* when USB appeared after running on battery */
 
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(TASK_PERIOD_MS));
@@ -358,6 +360,20 @@ static void power_task(void *arg)
         }
 
         power_charge_t c = chg_update(&trk, now_ms());
+
+        /* Plugged in while running on battery: end the session and go to charge-only.
+         * Booting on USB (bench use) keeps running; only a battery -> USB transition counts. */
+        if (POWER_AUTO_STOP_ON_USB && c != POWER_CHARGE_NO_USB && s_charge == POWER_CHARGE_NO_USB) {
+            if (usb_since < 0) {
+                usb_since = now_ms();
+            } else if (now_ms() - usb_since >= USB_STOP_DEBOUNCE_MS) {
+                ESP_LOGI(TAG, "USB plugged in: ending the session, charge-only");
+                power_shutdown();
+            }
+            continue;   /* keep s_charge at "no USB" until the debounce settles */
+        }
+        usb_since = -1;
+
         if (c != s_charge) {
             ESP_LOGI(TAG, "Charge state: %s", charge_name(c));
             s_charge = c;

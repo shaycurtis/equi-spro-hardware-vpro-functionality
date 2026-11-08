@@ -1,7 +1,7 @@
 # Equimetrics VPro firmware (SPRO PCBA)
 
 Custom firmware for the Equimetrics SPRO sensor board (ESP32-S3-WROOM-1-N16R8), a horse-worn
-chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-08, ~04:00** (end of day 1).
+chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-08, afternoon** (after the overnight test).
 
 > **Signing keys never leave this PC.** `**/private/` and `*.pem` are git-ignored. All
 > building and signing is local.
@@ -31,7 +31,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
 | Sessions + RFID HorseID | ✅ Session = Unix time at boot; tag scanned at boot (JY-LD6900, 9600 ASCII); per-session dashboard view |
-| Power optimisation (2e) | 🟡 Automatic light sleep done and verified on battery; drain estimate on the dashboard; **measuring overnight**. Burst/TX-power tuning after the range test |
+| Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate. Finding the extra current is next |
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
 | SD card EDF logging + Wi-Fi upload (phase 3) | ⏳ Not started |
@@ -42,7 +42,8 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 1. **Power on:** hold the power button ~1.5 s. Green double flash, then **both LEDs blink green**: scan the horse's tag.
 2. **Tag read** (or 2 min timeout): D1 gives a short blue blink every 5 s, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
 3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
-4. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (D2 red = charging, green = full).
+4. **Plugging in USB** while running on battery ends the session automatically (after 2 s): orange flashes, then charge-only (D2 red/green). Booting while already on USB keeps running (bench use).
+5. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (D2 red = charging, green = full).
 
 ## Build and flash (device firmware)
 
@@ -103,30 +104,33 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 - **Light sleep pitfalls (fixed, keep in mind):** ESP-IDF floats every GPIO in light sleep unless
   `gpio_sleep_sel_dis()` is set, which would drop PMIC_EN and cut power; UARTs must be clocked from
   XTAL (APB scales with DFS); an enabled RMT channel blocks sleep; FreeRTOS ticks lag in light
-  sleep, so use `esp_timer` for real-time deadlines and pulse timing.
+  sleep, so use `esp_timer` for real-time deadlines and pulse timing. The WS2812 data line can
+  glitch across a sleep/wake, so every frame is preceded by a full reset period.
 - **RTC oscillator-stop flag** was seen once after the RFID reader switched on (coin cell is fitted).
   Firmware tolerates it (plausible date still used) and the gateway re-syncs time. Measure the coin cell
   if it recurs.
 - **Gateway DB**: readings are not unique by (seq, uptime); de-dup is in memory per burst. Session
   losses are only counted within one gateway run + one device session.
 
-## Where we left off (overnight test, 2026-11-08)
+## Overnight test results (2026-11-08, firmware 4d51a5e)
 
-- Device flashed with commit `4d51a5e` (light sleep, 5 s heartbeat, heart rate in advert v4).
-- The user is wearing it overnight **on battery**, with their own gateway running
-  (`python gateway\gateway.py --serial COM4 --web`); nothing of ours holds COM3/COM4.
-- **First thing to check:** the device card at http://localhost:8080. The "Battery drain"
-  line (fuel-gauge fit over the session, 1500 mAh) and the heart-rate chart for the night.
-  The same numbers come from `webapp.drain_estimate()` and the `readings` table
-  (`usb = 0`, `heart_rate`). Estimate before measuring: about 3-6 mA plus under 0.5 mA for heart rate.
-- If the drain is much higher than expected, the first suspect is the main crystal kept on in light
-  sleep for BLE (`CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP`). Others: wake rate (power task
-  250 ms, scan button 100 ms, heart-rate poll 250 ms), WS2812 standby current.
+- 03:44-16:12 UTC (12.5 h) on battery, worn on the chest. **1497/1497 readings received, no gaps**,
+  ~17/20 adverts per burst, RSSI -58 to -73 dBm across the house.
+- Heart rate valid in every reading while worn (median 63-72 bpm, falling through the night); a few
+  single-reading outliers up to ~100 bpm. Garbage (31-157) only after the device came off.
+- **Battery:** 98.8 % -> 86.9 % (4175 -> 4080 mV). Linear fit **0.95 %/h ≈ 14 mA**; 16 mA in the
+  first 4 h, 11.5 mA in the last 4.5 h (the MAX17048 reads steeper near full). Call it 12-14 mA,
+  i.e. about 4.5-5 days per charge. Expected 3-6 mA, so ~8 mA is unaccounted for.
+- Suspects, in order: the two WS2812s' standby current (~1 mA each, powered all the time); main
+  XTAL kept on in light sleep; how much time the chip really spends asleep (build with
+  `CONFIG_PM_PROFILING` and dump `esp_pm_dump_locks()`); MAX30001 and GPS backup current.
+- Fixes since: WS2812 frame shift after light-sleep wake (D1 stuck green until the next blink),
+  and auto-stop on USB plug-in. Built, not yet flashed/verified at the time of writing.
 
 ## Next steps
 
-1. **Phase 2e, power:** read the overnight drain estimate (dashboard card); then shorten the 2 s
-   burst (~18/20 adverts arrive) and tune TX power after the range test.
+1. **Phase 2e, power:** find the extra ~8 mA (PM profiling, WS2812 standby, XTAL); then shorten
+   the 2 s burst (~17/20 adverts arrive) and tune TX power after the range test.
 2. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
 3. **Respiration** (MAX30001 BioZ or ECG-derived), and checking R-to-R detection on a horse ECG
    (large T waves may need WNDW/PTSF tuning).
