@@ -5,10 +5,12 @@
 
 JSON API (kept small and storage-agnostic so it can later front AWS instead of SQLite):
     GET /api/devices                       latest reading + last-hour reception stats per device
+    GET /api/sessions?device=ID            device sessions (boot / horse scan), newest first
     GET /api/readings?device=ID&hours=N    time series (bucket-averaged for long ranges)
+    GET /api/readings?device=ID&session=S  one session's time series
     POST /api/ecg {device, seconds, test}  request an on-demand ECG capture (gateway --serial --web only)
     GET /api/ecg/status?id=N               progress of a capture
-    GET /api/ecg/list?device=ID            recent captures (metadata)
+    GET /api/ecg/list?device=ID[&session=S] recent captures (metadata)
     GET /api/ecg/capture?id=N              one capture with samples in mV
 """
 from __future__ import annotations
@@ -90,22 +92,50 @@ def api_devices(db: Path) -> list[dict]:
     return latest
 
 
-def api_readings(db: Path, device: str, hours: float) -> dict:
+def api_sessions(db: Path, device: str) -> list[dict]:
     now = int(datetime.now(timezone.utc).timestamp())
-    since = now - int(hours * 3600)
-    bucket = max(1, int(hours * 3600 / MAX_POINTS))
+    rows = query(db, f"""
+        SELECT s.session_id, s.horse_id, s.started_at, s.first_seen, s.last_seen, s.readings,
+               (SELECT COUNT(*) FROM ecg_captures e WHERE e.device_id = s.device_id
+                  AND e.device_session = s.session_id AND e.status = 'done') AS ecg_count
+        FROM device_sessions s WHERE s.device_id = ? ORDER BY s.first_seen DESC LIMIT 100""", (device,))
+    if not rows:   # older databases without ecg_captures.device_session
+        rows = query(db, """
+            SELECT session_id, horse_id, started_at, first_seen, last_seen, readings, 0 AS ecg_count
+            FROM device_sessions WHERE device_id = ? ORDER BY first_seen DESC LIMIT 100""", (device,))
+    for i, r in enumerate(rows):
+        last = int(datetime.fromisoformat(r["last_seen"]).timestamp())
+        start = r["started_at"] or r["first_seen"]
+        r["start_t"] = int(datetime.fromisoformat(start).timestamp())
+        r["last_t"] = last
+        r["live"] = i == 0 and now - last < 3 * SAMPLE_PERIOD_S
+        r["random_id"] = bool(r["session_id"] & (1 << 31))
+    return rows
+
+
+def api_readings(db: Path, device: str, hours: float, session: int | None = None) -> dict:
+    now = int(datetime.now(timezone.utc).timestamp())
+    if session is None:
+        where, args = f"device_id = ? AND {EPOCH} >= ?", (device, now - int(hours * 3600))
+        span = int(hours * 3600)
+    else:
+        where, args = "device_id = ? AND device_session = ?", (device, session)
+        rng = query(db, f"SELECT MIN({EPOCH}) AS a, MAX({EPOCH}) AS b FROM readings WHERE {where}", args)
+        a, b = (rng[0]["a"], rng[0]["b"]) if rng and rng[0]["a"] is not None else (now, now)
+        span = max(SAMPLE_PERIOD_S, b - a)
+    bucket = max(1, int(span / MAX_POINTS))
     if bucket <= SAMPLE_PERIOD_S:
         rows = query(db, f"""
             SELECT {EPOCH} AS t, battery_soc AS soc, battery_mv AS mv, temp_c AS temp, humidity AS rh,
                    steps, rssi_best AS rssi, packets, usb, charging, charge_full
-            FROM readings WHERE device_id = ? AND {EPOCH} >= ? ORDER BY id""", (device, since))
+            FROM readings WHERE {where} ORDER BY id""", args)
     else:
         rows = query(db, f"""
             SELECT MIN({EPOCH}) AS t, AVG(battery_soc) AS soc, AVG(battery_mv) AS mv, AVG(temp_c) AS temp,
                    AVG(humidity) AS rh, MAX(steps) AS steps, AVG(rssi_best) AS rssi, AVG(packets) AS packets,
                    MAX(usb) AS usb, MAX(charging) AS charging, MAX(charge_full) AS charge_full
-            FROM readings WHERE device_id = ? AND {EPOCH} >= ?
-            GROUP BY {EPOCH} / ? ORDER BY t""", (device, since, bucket))
+            FROM readings WHERE {where}
+            GROUP BY {EPOCH} / ? ORDER BY t""", args + (bucket,))
     # Steps per interval: the counter restarts at each power-on, so treat a drop as a reset.
     prev = None
     for r in rows:
@@ -120,15 +150,17 @@ def api_readings(db: Path, device: str, hours: float) -> dict:
         else:
             r["steps_delta"] = s - prev
         prev = s
-    return {"device": device, "hours": hours, "bucket_s": bucket if bucket > SAMPLE_PERIOD_S else SAMPLE_PERIOD_S,
-            "rows": rows}
+    return {"device": device, "hours": hours, "session": session,
+            "bucket_s": bucket if bucket > SAMPLE_PERIOD_S else SAMPLE_PERIOD_S, "rows": rows}
 
 
-def api_ecg_list(db: Path, device: str) -> list[dict]:
-    return query(db, """
-        SELECT id, device_id, requested_at, completed_at, seconds, test_signal, status, detail,
-               sample_rate, n_samples, missing, overflows
-        FROM ecg_captures WHERE device_id = ? ORDER BY id DESC LIMIT 20""", (device,))
+def api_ecg_list(db: Path, device: str, session: int | None = None) -> list[dict]:
+    cols = """id, device_id, requested_at, completed_at, seconds, test_signal, status, detail,
+              sample_rate, n_samples, missing, overflows"""
+    if session is not None:
+        return query(db, f"""SELECT {cols} FROM ecg_captures WHERE device_id = ? AND device_session = ?
+                             ORDER BY id DESC LIMIT 50""", (device, session))
+    return query(db, f"SELECT {cols} FROM ecg_captures WHERE device_id = ? ORDER BY id DESC LIMIT 20", (device,))
 
 
 def api_ecg_capture(db: Path, cap_id: int) -> dict | None:
@@ -188,10 +220,13 @@ def make_handler(db: Path, ecg=None):
                     self.send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
                 elif url.path == "/api/devices":
                     self.send(200, json.dumps(api_devices(db)).encode(), "application/json")
+                elif url.path == "/api/sessions":
+                    self.send_json(200, api_sessions(db, q.get("device", [""])[0]))
                 elif url.path == "/api/readings":
                     dev = q.get("device", [""])[0]
                     hours = min(24 * 30, max(0.1, float(q.get("hours", ["6"])[0])))
-                    self.send(200, json.dumps(api_readings(db, dev, hours)).encode(), "application/json")
+                    sess = q.get("session", [None])[0]
+                    self.send_json(200, api_readings(db, dev, hours, int(sess) if sess else None))
                 elif url.path == "/api/ecg/status":
                     cid = int(q.get("id", ["0"])[0])
                     st = ecg.status(cid) if ecg else None
@@ -201,7 +236,8 @@ def make_handler(db: Path, ecg=None):
                         st = rows[0] if rows else None
                     self.send_json(200 if st else 404, st or {"error": "unknown capture"})
                 elif url.path == "/api/ecg/list":
-                    self.send_json(200, api_ecg_list(db, q.get("device", [""])[0]))
+                    sess = q.get("session", [None])[0]
+                    self.send_json(200, api_ecg_list(db, q.get("device", [""])[0], int(sess) if sess else None))
                 elif url.path == "/api/ecg/capture":
                     cap = api_ecg_capture(db, int(q.get("id", ["0"])[0]))
                     self.send_json(200 if cap else 404, cap or {"error": "unknown capture"})

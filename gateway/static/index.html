@@ -66,6 +66,16 @@
   .ecglist button { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px;
                     padding: 3px 8px; font: 12px/1.4 inherit; cursor: pointer; }
   .ecglist button.on { border-color: var(--accent); color: var(--accent); }
+  .sessions h2 { font-size: 16px; margin: 24px 0 10px; display: flex; gap: 10px; align-items: baseline; }
+  .sessions h2 span { font-size: 13px; font-weight: 400; }
+  .sesslist { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  .sess { flex: 0 0 auto; min-width: 190px; text-align: left; border: 1px solid var(--line); background: var(--panel);
+          color: var(--text); border-radius: 10px; padding: 10px 12px; cursor: pointer; font: inherit; }
+  .sess.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .sess .when { font-weight: 600; }
+  .sess .meta { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+  .sess .live { display: inline-block; font-size: 11px; font-weight: 600; color: var(--ok); border: 1px solid var(--ok);
+                border-radius: 999px; padding: 0 6px; margin-left: 6px; vertical-align: 1px; }
   .empty { padding: 40px; text-align: center; color: var(--muted); background: var(--panel);
            border: 1px dashed var(--line); border-radius: 10px; }
 </style>
@@ -78,6 +88,10 @@
 </header>
 <main>
   <div class="devices" id="devices"></div>
+  <section class="sessions" id="sessionsPanel" hidden>
+    <h2>Sessions <span class="muted">a session starts at each power-on, or when a different horse is scanned</span></h2>
+    <div class="sesslist" id="sessions"></div>
+  </section>
   <section class="detail" id="detail" hidden>
     <h2 id="detailTitle"></h2>
     <div class="charts">
@@ -106,6 +120,10 @@ const RANGES = [["1h", 1], ["6h", 6], ["24h", 24], ["7d", 168]];
 const REFRESH_MS = 15000;
 let hours = Number(localStorageGet("hours") || 6);
 let selected = localStorageGet("device");
+let view = localStorageGet("view") || "session";   // "session" | "range"
+let selSession = null;                             // null = newest session
+let sessions = [];
+let xMin = 0, xMax = 0;
 const charts = {};
 
 function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -141,8 +159,10 @@ function renderRanges() {
   for (const [label, h] of RANGES) {
     const b = document.createElement("button");
     b.textContent = label;
-    b.className = h === hours ? "on" : "";
-    b.onclick = () => { hours = h; localStorageSet("hours", h); renderRanges(); loadDetail(); };
+    b.className = view === "range" && h === hours ? "on" : "";
+    b.title = "All data from this device in the time range (any session)";
+    b.onclick = () => { hours = h; view = "range"; localStorageSet("hours", h); localStorageSet("view", view);
+                        renderRanges(); renderSessions(); loadDetail(); loadEcgList(); };
     el.appendChild(b);
   }
 }
@@ -179,15 +199,15 @@ function renderDevices(devs) {
       <div class="horse">${horseLine(d)}</div>
       <div class="rx">Last seen ${ago(d.age_s)} · last hour: ${h.readings}/${h.expected} readings,
         ${fmt(h.adverts_per_burst, 1)} adverts/burst, avg RSSI ${fmt(h.rssi)} dBm</div>`;
-    card.onclick = () => { selected = d.device_id; localStorageSet("device", selected); ecgShown = null;
-                           renderDevices(devs); loadDetail(); loadEcgList(); };
+    card.onclick = async () => { selected = d.device_id; localStorageSet("device", selected); ecgShown = null;
+                                 selSession = null; renderDevices(devs); await loadSessions(); loadDetail(); loadEcgList(); };
     el.appendChild(card);
   }
 }
 
 function timeTick(v) {
   const d = new Date(v);
-  return hours > 24 ? d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " +
+  return (xMax - xMin) > 24 * 3600e3 ? d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " +
     d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -197,7 +217,7 @@ function baseOptions(yAxes) {
   const ticks = { color: css("--muted") };
   const scales = {
     x: { type: "linear", grid, ticks: { ...ticks, maxTicksLimit: 8, callback: timeTick },
-         min: Date.now() - hours * 3600e3, max: Date.now() },
+         min: xMin, max: xMax },
   };
   for (const [id, cfg] of Object.entries(yAxes)) scales[id] = { grid: id === "y" ? grid : { display: false }, ticks, ...cfg };
   return {
@@ -230,16 +250,75 @@ function draw(id, type, datasets, yAxes) {
   charts[id] = new Chart(document.getElementById(id), { type, data: { datasets }, options: baseOptions(yAxes) });
 }
 
+function fmtDur(s) {
+  if (s < 90) return `${Math.max(1, Math.round(s))} s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  return `${(s / 3600).toFixed(1)} h`;
+}
+function fmtWhen(t) {
+  const d = new Date(t * 1000), today = new Date();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === today.toDateString() ? `Today ${time}`
+    : `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
+}
+function currentSession() {
+  if (view !== "session" || !sessions.length) return null;
+  return sessions.find(x => x.session_id === selSession) || sessions[0];
+}
+
+async function loadSessions() {
+  if (!selected) return;
+  sessions = await (await fetch(`/api/sessions?device=${encodeURIComponent(selected)}`)).json();
+  if (selSession !== null && !sessions.some(x => x.session_id === selSession)) selSession = null;
+  renderSessions();
+}
+
+function renderSessions() {
+  const panel = document.getElementById("sessionsPanel");
+  const el = document.getElementById("sessions");
+  panel.hidden = !sessions.length;
+  el.innerHTML = "";
+  const cur = currentSession();
+  for (const x of sessions) {
+    const b = document.createElement("button");
+    b.className = "sess" + (cur && cur.session_id === x.session_id ? " sel" : "");
+    const horse = x.horse_id ? `Horse ${x.horse_id.slice(0, 3)} ${x.horse_id.slice(3)}` : "No horse scanned";
+    const ecg = x.ecg_count ? ` · ${x.ecg_count} ECG` : "";
+    b.innerHTML = `<div class="when">${fmtWhen(x.start_t)}${x.live ? '<span class="live">LIVE</span>' : ""}</div>
+      <div class="meta">${horse}<br>${fmtDur(x.last_t - x.start_t + 30)} · ${x.readings} readings${ecg}</div>`;
+    b.title = `Session ${x.session_id}${x.random_id ? " (random ID: device clock was not set)" : ""}`;
+    b.onclick = () => { view = "session"; selSession = x.session_id; localStorageSet("view", view); ecgShown = null;
+                        renderRanges(); renderSessions(); loadDetail(); loadEcgList(); };
+    el.appendChild(b);
+  }
+}
+
 async function loadDetail() {
   if (!selected) return;
-  const res = await fetch(`/api/readings?device=${encodeURIComponent(selected)}&hours=${hours}`);
+  const cur = currentSession();
+  const q = cur ? `session=${cur.session_id}` : `hours=${hours}`;
+  const res = await fetch(`/api/readings?device=${encodeURIComponent(selected)}&${q}`);
   const data = await res.json();
   const rows = data.rows;
   bucketS = data.bucket_s;
+  if (cur) {
+    xMin = cur.start_t * 1000;
+    xMax = cur.live ? Date.now() : (cur.last_t + 30) * 1000;
+  } else {
+    xMax = Date.now();
+    xMin = xMax - hours * 3600e3;
+  }
   document.getElementById("detail").hidden = false;
-  document.getElementById("detailTitle").textContent =
-    `${selected} · last ${RANGES.find(r => r[1] === hours)?.[0] ?? hours + "h"} · ${rows.length} points` +
-    (data.bucket_s > 30 ? ` (${Math.round(data.bucket_s / 60)} min averages)` : "");
+  const avg = data.bucket_s > 30 ? ` (${Math.round(data.bucket_s / 60)} min averages)` : "";
+  document.getElementById("detailTitle").textContent = cur
+    ? `${selected} · session ${fmtWhen(cur.start_t)}${cur.live ? " (live)" : ""} · ` +
+      `${cur.horse_id ? "horse " + cur.horse_id : "no horse"} · ${rows.length} points${avg}`
+    : `${selected} · all data, last ${RANGES.find(r => r[1] === hours)?.[0] ?? hours + "h"} · ${rows.length} points${avg}`;
+  const btn = document.getElementById("ecgBtn");
+  if (!ecgPolling) {
+    btn.disabled = !!cur && !cur.live;
+    btn.title = btn.disabled ? "Select the live session to capture a new ECG" : "";
+  }
   const line = (label, key, color, yAxisID = "y") =>
     ({ label, data: series(rows, key), borderColor: color, backgroundColor: color, yAxisID,
        pointRadius: 0, pointHitRadius: 6, borderWidth: 2, tension: 0.2, spanGaps: false });
@@ -263,7 +342,20 @@ let ecgPolling = false;
 
 async function loadEcgList() {
   if (!selected) return;
-  const list = await (await fetch(`/api/ecg/list?device=${encodeURIComponent(selected)}`)).json();
+  const cur = currentSession();
+  const list = await (await fetch(`/api/ecg/list?device=${encodeURIComponent(selected)}` +
+                                  (cur ? `&session=${cur.session_id}` : ""))).json();
+  if (!list.length) {
+    document.getElementById("ecgList").innerHTML = `<span class="muted">No ECG captures ${cur ? "in this session" : "yet"}.</span>`;
+    if (charts.chEcg) { charts.chEcg.destroy(); delete charts.chEcg; }
+    if (!ecgPolling) {
+      ecgShown = null;
+      document.getElementById("ecgStatus").textContent = cur && !cur.live
+        ? "ECG captures taken during this session appear here."
+        : "The device is contacted on its next advert (within 30 s), then streams the capture.";
+    }
+    return;
+  }
   const el = document.getElementById("ecgList");
   el.innerHTML = "";
   for (const c of list) {
@@ -335,6 +427,7 @@ async function refresh() {
   try {
     const devs = await (await fetch("/api/devices")).json();
     renderDevices(devs);
+    await loadSessions();
     await loadDetail();
     document.getElementById("updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
   } catch (e) {
