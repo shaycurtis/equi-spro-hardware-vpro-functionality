@@ -4,6 +4,7 @@ Scans for VPro telemetry adverts, de-duplicates each 2 s burst (one reading per
 device+seq), prints it, and stores it in SQLite. Also tracks reception quality for
 range testing: adverts heard per burst, best RSSI, and missed bursts (seq gaps).
 
+    python gateway.py --serial COM4 --web   # ESP32 receiver + dashboard at http://localhost:8080
     python gateway.py --serial COM4   # via the ESP32 receiver dev kit (recommended)
     python gateway.py                 # via the PC's own Bluetooth
     python gateway.py --verbose       # also print every individual advert
@@ -14,6 +15,7 @@ import argparse
 import asyncio
 import signal
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS readings (
     rssi_best     INTEGER,
     packets       INTEGER,              -- adverts heard in this burst (range indicator)
     address       TEXT,
+    session       INTEGER,              -- gateway run (start time); loss stats only compare within one
     UNIQUE (device_id, seq, uptime_min)
 );
 CREATE INDEX IF NOT EXISTS idx_readings_dev_time ON readings (device_id, received_at);
@@ -62,8 +65,14 @@ class DeviceStats:
 class Gateway:
     def __init__(self, db_path: Path, verbose: bool):
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(db_path)
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.execute("PRAGMA journal_mode=WAL")   # web app reads while we write
         self.db.executescript(SCHEMA)
+        try:   # databases created before the session column existed
+            self.db.execute("ALTER TABLE readings ADD COLUMN session INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        self.session = int(time.time())
         self.verbose = verbose
         self.current: dict[str, tuple[int, int, int]] = {}   # device -> (seq, uptime, row id)
         self.stats: dict[str, DeviceStats] = {}
@@ -127,11 +136,12 @@ class Gateway:
         cur = self.db.execute(
             """INSERT OR IGNORE INTO readings
                (received_at, device_id, seq, uptime_min, battery_soc, battery_mv, temp_c, humidity,
-                steps, usb, charging, charge_full, charger_fault, rtc_valid, rssi_best, packets, address)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
+                steps, usb, charging, charge_full, charger_fault, rtc_valid, rssi_best, packets, address, session)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
             (datetime.now(timezone.utc).isoformat(timespec="seconds"), r["device_id"], r["seq"],
              r["uptime_min"], r["battery_soc"], r["battery_mv"], r["temp_c"], r["humidity"], r["steps"],
-             r["usb"], r["charging"], r["charge_full"], r["charger_fault"], r["rtc_valid"], rssi, address),
+             r["usb"], r["charging"], r["charge_full"], r["charger_fault"], r["rtc_valid"], rssi, address,
+             self.session),
         )
         self.db.commit()
         return cur.lastrowid
@@ -167,11 +177,16 @@ async def main() -> None:
     ap.add_argument("--summary", type=int, default=300, help="seconds between reception summaries")
     ap.add_argument("--duration", type=float, default=0, help="stop after N seconds (0 = run until Ctrl+C)")
     ap.add_argument("--serial", metavar="COMx", help="read from the ESP32 receiver on this port instead of PC Bluetooth")
+    ap.add_argument("--web", metavar="PORT", type=int, nargs="?", const=8080,
+                    help="also serve the dashboard (default port 8080)")
     args = ap.parse_args()
     if args.duration:
         asyncio.get_running_loop().call_later(args.duration, lambda: stop.set())
 
     gw = Gateway(args.db, args.verbose)
+    if args.web:
+        from webapp import serve
+        serve(args.db, args.web, background=True)
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             asyncio.get_running_loop().add_signal_handler(sig, stop.set)

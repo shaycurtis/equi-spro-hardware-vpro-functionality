@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Equimetrics Devices</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #17202a; --muted: #5f6b7a; --line: #e3e7ec;
+    --accent: #2f6fdb; --ok: #1f9d55; --warn: #c27c0e; --bad: #c8372d;
+    --c1: #2f6fdb; --c2: #d9822b; --c3: #1f9d55; --c4: #8e5bd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1419; --panel: #171e26; --text: #e6ebf0; --muted: #94a1b2; --line: #263140;
+      --accent: #6ea0ff; --ok: #3ccf7f; --warn: #f0a83a; --bad: #ff6b5e;
+      --c1: #6ea0ff; --c2: #f0a35a; --c3: #3ccf7f; --c4: #b68cff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+           padding: 16px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .muted { color: var(--muted); }
+  main { max-width: 1280px; margin: 0 auto; padding: 20px 24px 40px; }
+  .ranges { display: flex; gap: 4px; }
+  .ranges button { border: 1px solid var(--line); background: var(--panel); color: var(--text);
+                   padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  .ranges button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+          cursor: pointer; transition: border-color .15s; }
+  .card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .card .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .card .id { font-weight: 650; font-size: 15px; letter-spacing: .02em; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 10px; }
+  .stat .v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 12px; color: var(--muted); }
+  .batt { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  .batt i { display: block; height: 100%; background: var(--ok); }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .rx { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .detail h2 { font-size: 16px; margin: 28px 0 12px; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 12px; }
+  @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } main, header { padding-left: 16px; padding-right: 16px; } }
+  .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .chart h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+  .chart .box { position: relative; height: 220px; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); background: var(--panel);
+           border: 1px dashed var(--line); border-radius: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Equimetrics <span>· devices</span></h1>
+  <div class="ranges" id="ranges"></div>
+  <div class="muted" id="updated">loading…</div>
+</header>
+<main>
+  <div class="devices" id="devices"></div>
+  <section class="detail" id="detail" hidden>
+    <h2 id="detailTitle"></h2>
+    <div class="charts">
+      <div class="chart"><h3>Battery</h3><div class="box"><canvas id="chBatt"></canvas></div></div>
+      <div class="chart"><h3>Temperature &amp; humidity</h3><div class="box"><canvas id="chEnv"></canvas></div></div>
+      <div class="chart"><h3>Activity (steps per interval)</h3><div class="box"><canvas id="chSteps"></canvas></div></div>
+      <div class="chart"><h3>Reception (best RSSI and adverts heard per burst)</h3><div class="box"><canvas id="chRx"></canvas></div></div>
+    </div>
+  </section>
+</main>
+<script>
+const RANGES = [["1h", 1], ["6h", 6], ["24h", 24], ["7d", 168]];
+const REFRESH_MS = 15000;
+let hours = Number(localStorageGet("hours") || 6);
+let selected = localStorageGet("device");
+const charts = {};
+
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = (v, d = 0, unit = "") => (v === null || v === undefined) ? "–" : `${Number(v).toFixed(d)}${unit}`;
+
+function ago(s) {
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+function chargeLabel(d) {
+  if (d.charger_fault) return ["charger fault", css("--bad")];
+  if (d.charging) return ["charging", css("--warn")];
+  if (d.charge_full) return ["full", css("--ok")];
+  if (d.usb) return ["usb", css("--muted")];
+  return ["on battery", css("--muted")];
+}
+
+function renderRanges() {
+  const el = document.getElementById("ranges");
+  el.innerHTML = "";
+  for (const [label, h] of RANGES) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = h === hours ? "on" : "";
+    b.onclick = () => { hours = h; localStorageSet("hours", h); renderRanges(); loadDetail(); };
+    el.appendChild(b);
+  }
+}
+
+function renderDevices(devs) {
+  const el = document.getElementById("devices");
+  if (!devs.length) {
+    el.innerHTML = `<div class="empty">No readings yet. Start the gateway and power on a device.</div>`;
+    return;
+  }
+  if (!selected || !devs.some(d => d.device_id === selected)) selected = devs[0].device_id;
+  el.innerHTML = "";
+  for (const d of devs) {
+    const [cl, cc] = chargeLabel(d);
+    const h = d.hour;
+    const soc = d.battery_soc ?? 0;
+    const battColor = soc < 20 ? css("--bad") : soc < 40 ? css("--warn") : css("--ok");
+    const card = document.createElement("div");
+    card.className = "card" + (d.device_id === selected ? " sel" : "");
+    card.innerHTML = `
+      <div class="top">
+        <div class="id"><span class="dot" style="background:${d.online ? css("--ok") : css("--muted")}"></span>${d.device_id}</div>
+        <span class="pill" style="color:${cc};border-color:${cc}">${cl}</span>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="v">${fmt(d.battery_soc, 0, "%")}</div><div class="l">${fmt(d.battery_mv, 0, " mV")}</div>
+          <div class="batt"><i style="width:${soc}%;background:${battColor}"></i></div></div>
+        <div class="stat"><div class="v">${fmt(d.temp_c, 1, "°C")}</div><div class="l">board temp</div></div>
+        <div class="stat"><div class="v">${fmt(d.humidity, 0, "%")}</div><div class="l">humidity</div></div>
+        <div class="stat"><div class="v">${fmt(d.steps)}</div><div class="l">steps since on</div></div>
+        <div class="stat"><div class="v">${fmt(d.rssi_best, 0)}</div><div class="l">RSSI dBm</div></div>
+        <div class="stat"><div class="v">${Math.floor(d.uptime_min / 60)}h${String(d.uptime_min % 60).padStart(2, "0")}</div><div class="l">uptime</div></div>
+      </div>
+      <div class="rx">Last seen ${ago(d.age_s)} · last hour: ${h.readings}/${h.expected} readings,
+        ${fmt(h.adverts_per_burst, 1)} adverts/burst, avg RSSI ${fmt(h.rssi)} dBm</div>`;
+    card.onclick = () => { selected = d.device_id; localStorageSet("device", selected); renderDevices(devs); loadDetail(); };
+    el.appendChild(card);
+  }
+}
+
+function timeTick(v) {
+  const d = new Date(v);
+  return hours > 24 ? d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " +
+    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function baseOptions(yAxes) {
+  const grid = { color: css("--line") };
+  const ticks = { color: css("--muted") };
+  const scales = {
+    x: { type: "linear", grid, ticks: { ...ticks, maxTicksLimit: 8, callback: timeTick },
+         min: Date.now() - hours * 3600e3, max: Date.now() },
+  };
+  for (const [id, cfg] of Object.entries(yAxes)) scales[id] = { grid: id === "y" ? grid : { display: false }, ticks, ...cfg };
+  return {
+    responsive: true, maintainAspectRatio: false, animation: false, parsing: false, normalized: true,
+    interaction: { mode: "nearest", axis: "x", intersect: false },
+    plugins: {
+      legend: { labels: { color: css("--text"), boxWidth: 12 } },
+      tooltip: { callbacks: { title: (items) => new Date(items[0].parsed.x).toLocaleString() } },
+    },
+    scales,
+  };
+}
+
+let bucketS = 30;
+function series(rows, key) {
+  // Break the line where data is missing (gateway/device off) instead of drawing across the gap.
+  const out = [];
+  let prevT = null;
+  for (const r of rows) {
+    if (r[key] === null || r[key] === undefined) continue;
+    if (prevT !== null && r.t - prevT > 3 * bucketS) out.push({ x: (prevT + bucketS) * 1000, y: null });
+    out.push({ x: r.t * 1000, y: r[key] });
+    prevT = r.t;
+  }
+  return out;
+}
+
+function draw(id, type, datasets, yAxes) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(document.getElementById(id), { type, data: { datasets }, options: baseOptions(yAxes) });
+}
+
+async function loadDetail() {
+  if (!selected) return;
+  const res = await fetch(`/api/readings?device=${encodeURIComponent(selected)}&hours=${hours}`);
+  const data = await res.json();
+  const rows = data.rows;
+  bucketS = data.bucket_s;
+  document.getElementById("detail").hidden = false;
+  document.getElementById("detailTitle").textContent =
+    `${selected} · last ${RANGES.find(r => r[1] === hours)?.[0] ?? hours + "h"} · ${rows.length} points` +
+    (data.bucket_s > 30 ? ` (${Math.round(data.bucket_s / 60)} min averages)` : "");
+  const line = (label, key, color, yAxisID = "y") =>
+    ({ label, data: series(rows, key), borderColor: color, backgroundColor: color, yAxisID,
+       pointRadius: 0, pointHitRadius: 6, borderWidth: 2, tension: 0.2, spanGaps: false });
+
+  draw("chBatt", "line", [line("State of charge %", "soc", css("--c3")), line("Voltage mV", "mv", css("--c1"), "y1")],
+       { y: { min: 0, max: 100, title: { display: true, text: "%", color: css("--muted") } },
+         y1: { position: "right", title: { display: true, text: "mV", color: css("--muted") } } });
+  draw("chEnv", "line", [line("Temperature °C", "temp", css("--c2")), line("Humidity %RH", "rh", css("--c1"), "y1")],
+       { y: { title: { display: true, text: "°C", color: css("--muted") } },
+         y1: { position: "right", min: 0, max: 100, title: { display: true, text: "%RH", color: css("--muted") } } });
+  draw("chSteps", "bar", [{ label: "Steps", data: series(rows, "steps_delta"), backgroundColor: css("--c4"),
+       barThickness: "flex", maxBarThickness: 8 }], { y: { beginAtZero: true } });
+  draw("chRx", "line", [line("Best RSSI dBm", "rssi", css("--c1")),
+       { ...line("Adverts per burst", "packets", css("--c3"), "y1"), type: "bar", maxBarThickness: 6 }],
+       { y: { title: { display: true, text: "dBm", color: css("--muted") } },
+         y1: { position: "right", min: 0, max: 22, title: { display: true, text: "adverts", color: css("--muted") } } });
+}
+
+async function refresh() {
+  try {
+    const devs = await (await fetch("/api/devices")).json();
+    renderDevices(devs);
+    await loadDetail();
+    document.getElementById("updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    document.getElementById("updated").textContent = `connection lost (${e.message})`;
+  }
+}
+
+renderRanges();
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
