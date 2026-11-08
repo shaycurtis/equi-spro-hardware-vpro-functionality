@@ -1,7 +1,7 @@
 #pragma once
 /*
- * On-demand ECG capture. Powers the MAX30001 rails (VCC_CTRL) only for the duration of a
- * capture, streams samples in fixed-size blocks to a callback, then powers everything off.
+ * MAX30001 owner: continuous heart rate (hardware R-to-R detector) plus on-demand ECG
+ * captures streamed in fixed-size blocks to a callback.
  *
  * Samples are int16 at 512 sps: the 18-bit AFE value >> 2, so 1 LSB = ECG_UV_PER_LSB uV
  * (~0.38 uV at gain 80) and full scale is about +-12.5 mV.
@@ -26,6 +26,15 @@ typedef struct {
     ecg_done_cb_t on_done;     /* called from the ECG task once, after power-down */
     void *ctx;
 } ecg_request_t;
+
+/* Start the ECG task: heart-rate monitoring runs continuously from then on. */
+esp_err_t ecg_init(void);
+
+/*
+ * Heart rate over the last `window_s` seconds: 60 / median beat-to-beat interval.
+ * *bpm = 0 if fewer than 3 plausible beats (electrodes off / not detecting).
+ */
+void ecg_hr_get(uint32_t window_s, uint8_t *bpm, uint8_t *beats);
 
 /* Start a capture in the background. ESP_ERR_INVALID_STATE if one is already running. */
 esp_err_t ecg_start(const ecg_request_t *req);

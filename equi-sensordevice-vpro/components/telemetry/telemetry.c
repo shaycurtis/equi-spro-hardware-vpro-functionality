@@ -37,6 +37,7 @@ void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN])
     put16(&out[15], (uint16_t)t->temp_c100);
     out[17] = t->humidity_half;
     put32(&out[18], t->steps);
+    out[22] = t->heart_rate;
 }
 
 /* --------------------------------------------------------------------- BLE */

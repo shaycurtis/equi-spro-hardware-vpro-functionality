@@ -170,13 +170,14 @@ def api_readings(db: Path, device: str, hours: float, session: int | None = None
     if bucket <= SAMPLE_PERIOD_S:
         rows = query(db, f"""
             SELECT {EPOCH} AS t, battery_soc AS soc, battery_mv AS mv, temp_c AS temp, humidity AS rh,
-                   steps, rssi_best AS rssi, packets, usb, charging, charge_full
+                   steps, rssi_best AS rssi, packets, usb, charging, charge_full, heart_rate AS hr
             FROM readings WHERE {where} ORDER BY id""", args)
     else:
         rows = query(db, f"""
             SELECT MIN({EPOCH}) AS t, AVG(battery_soc) AS soc, AVG(battery_mv) AS mv, AVG(temp_c) AS temp,
                    AVG(humidity) AS rh, MAX(steps) AS steps, AVG(rssi_best) AS rssi, AVG(packets) AS packets,
-                   MAX(usb) AS usb, MAX(charging) AS charging, MAX(charge_full) AS charge_full
+                   MAX(usb) AS usb, MAX(charging) AS charging, MAX(charge_full) AS charge_full,
+                   AVG(heart_rate) AS hr
             FROM readings WHERE {where}
             GROUP BY {EPOCH} / ? ORDER BY t""", args + (bucket,))
     # Steps per interval: the counter restarts at each power-on, so treat a drop as a reset.

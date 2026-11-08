@@ -1,16 +1,16 @@
 #pragma once
 /*
- * Telemetry adverts, format version 3.
+ * Telemetry adverts, format version 4.
  *
  * Sent as BLE legacy, connectable advertising (1M PHY; the gateway connects only for ECG /
  * time-set) so any scanner or commercial gateway can forward it. Both records are
  * Manufacturer Specific Data (type 0xFF) with company ID 0xFFFF (Bluetooth SIG "test / not
  * assigned" - replace with an Equimetrics company ID for production).
  *
- * ADVERT - live data, every 30 s (22 bytes after the company ID, little-endian unless noted):
+ * ADVERT - live data, every 30 s (23 bytes after the company ID, little-endian unless noted):
  *   off len field
  *    0   1  magic        0xE9
- *    1   1  version      0x03
+ *    1   1  version      0x04
  *    2   3  device_id    24-bit, BIG-endian (so 0x15B0B4 reads as "15B0B4")
  *    5   4  session      Unix time (UTC) when this session started (device boot, or a new
  *                        horse scanned). Bit 31 set = random ID because the RTC had no time.
@@ -22,8 +22,9 @@
  *   15   2  temp         int16, 0.01 degC, 0x7FFF = n/a
  *   17   1  humidity     0.5 %RH steps (0..200), 0xFF = n/a
  *   18   4  steps        uint32 since power-on, 0xFFFFFFFF = n/a
- *  (2 bytes spare in the 31-byte advert for heart rate / respiration)
- *  v2 (older firmware) is identical except battery_soc was 1 byte of whole %.
+ *   22   1  heart_rate   bpm over the last 30 s (MAX30001 R-to-R, median), 0 = no beats
+ *  (1 byte spare in the 31-byte advert, reserved for respiration)
+ *  v3 = v4 without heart_rate. v2 = v3 with battery_soc as 1 byte of whole %.
  *
  * SCAN RESPONSE - identity (15 bytes after the company ID) + complete local name "EQ-xxxxxx":
  *    0   1  magic        0xE9
@@ -39,8 +40,8 @@
 
 #define TELEMETRY_COMPANY_ID   0xFFFF
 #define TELEMETRY_MAGIC        0xE9
-#define TELEMETRY_VERSION      3
-#define TELEMETRY_PAYLOAD_LEN  22
+#define TELEMETRY_VERSION      4
+#define TELEMETRY_PAYLOAD_LEN  23
 #define TELEMETRY_IDENTITY     0x81
 #define TELEMETRY_IDENTITY_LEN 15
 
@@ -61,6 +62,7 @@ typedef struct {
     int16_t  temp_c100;
     uint8_t  humidity_half;
     uint32_t steps;
+    uint8_t  heart_rate;       /* bpm, 0 = n/a */
 } telemetry_t;
 
 void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN]);

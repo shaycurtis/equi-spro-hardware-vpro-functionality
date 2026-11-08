@@ -94,7 +94,13 @@ static void log_sample(const sensor_sample_t *s)
         snprintf(rtc, sizeof(rtc), "rtc 20%02d-%02d-%02d %02d:%02d:%02d%s", t->tm_year - 100, t->tm_mon + 1,
                  t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec, s->rtc_valid ? "" : " (INVALID)");
     }
-    ESP_LOGI(TAG, "[%s] %s | %s | %s | %s | %s", device_id_get(), batt, th, steps,
+    uint8_t bpm, beats;
+    ecg_hr_get(SAMPLE_PERIOD_S, &bpm, &beats);
+    char hr[24] = "HR n/a";
+    if (bpm) {
+        snprintf(hr, sizeof(hr), "HR %u bpm (%u beats)", bpm, beats);
+    }
+    ESP_LOGI(TAG, "[%s] %s | %s | %s | %s | %s | %s", device_id_get(), batt, th, steps, hr,
              charge_str(power_charge_state()), rtc);
 }
 
@@ -196,6 +202,8 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
         .humidity_half = s->th_ok ? (uint8_t)lroundf(s->rh * 2.0f) : 0xFF,
         .steps = s->imu_ok ? s->steps : 0xFFFFFFFF,
     };
+    uint8_t beats;
+    ecg_hr_get(SAMPLE_PERIOD_S, &t->heart_rate, &beats);
 }
 
 static void sample_task(void *arg)
@@ -261,6 +269,7 @@ void app_main(void)
     publish_identity();
     power_register_shutdown_cb(telemetry_ble_stop);
     power_register_shutdown_cb(ecg_shutdown);
+    ESP_ERROR_CHECK(ecg_init());           /* continuous heart rate from the MAX30001 */
     power_register_shutdown_cb(rfid_shutdown);
 
     start_rfid_scan();                   /* "scan the horse's tag" */

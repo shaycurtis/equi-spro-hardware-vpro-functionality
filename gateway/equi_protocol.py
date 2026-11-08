@@ -6,6 +6,7 @@ Manufacturer Specific Data, company ID 0xFFFF (test ID - replace for production)
   E9 01 ...  telemetry v1 (uptime, no session)       - older firmware
   E9 02 ...  telemetry v2 (session ID, 30 s data)    - advert (whole-% battery)
   E9 03 ...  telemetry v3 (as v2, battery in 1/256 %) - advert
+  E9 04 ...  telemetry v4 (v3 + heart rate)            - advert
   E9 81 ...  identity v1 (session ID, HorseID)       - scan response
 """
 from __future__ import annotations
@@ -42,6 +43,7 @@ class Telemetry:
     temp_c: Optional[float]
     humidity: Optional[float]       # %RH
     steps: Optional[int]
+    heart_rate: Optional[int]       # bpm (v4+), None = no beats / older firmware
     session: Optional[int]          # v2+: Unix time the session started (bit 31 = random)
     uptime_min: Optional[int]       # v1 only
     version: int
@@ -77,6 +79,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
         return None
     kind = payload[1]
     dev = payload[2:5].hex().upper() if len(payload) >= 5 else ""
+    hr = None
 
     if kind == 0x81 and len(payload) >= 15:
         session, = struct.unpack_from("<I", payload, 5)
@@ -96,7 +99,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
         rh_half = payload[16]
         steps, = struct.unpack_from("<I", payload, 17)
         uptime = None
-    elif kind == 3 and len(payload) >= 22:
+    elif kind in (3, 4) and len(payload) >= 22:
         session, = struct.unpack_from("<I", payload, 5)
         seq, flags = payload[9], payload[10]
         soc256, mv, temp = struct.unpack_from("<HHh", payload, 11)
@@ -104,25 +107,28 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
         rh_half = payload[17]
         steps, = struct.unpack_from("<I", payload, 18)
         uptime = None
+        if kind == 4 and len(payload) >= 23 and payload[22]:
+            hr = payload[22]
     else:
         return None   # unknown/newer format: ignore rather than mis-decode
 
     t = dict(device_id=dev, seq=seq, battery_soc=None if soc == 0xFF else soc,
              battery_mv=None if mv == 0 else mv, temp_c=None if temp == 0x7FFF else temp / 100.0,
              humidity=None if rh_half == 0xFF else rh_half / 2.0,
-             steps=None if steps == 0xFFFFFFFF else steps, session=session, uptime_min=uptime, version=kind)
+             steps=None if steps == 0xFFFFFFFF else steps, heart_rate=hr, session=session, uptime_min=uptime,
+             version=kind)
     _flags(t, flags)
     return Telemetry(**t)
 
 
 if __name__ == "__main__":
-    # v3 telemetry built the same way as the firmware's telemetry_encode()
-    p = bytes([MAGIC, 3, 0x15, 0xB0, 0xB4]) + struct.pack("<I", 1794100000)
+    # v4 telemetry built the same way as the firmware's telemetry_encode()
+    p = bytes([MAGIC, 4, 0x15, 0xB0, 0xB4]) + struct.pack("<I", 1794100000)
     p += bytes([7, FLAG_USB | FLAG_FULL | FLAG_RTC_VALID]) + struct.pack("<HHhB", round(87.25 * 256), 4181, 2416, 102)
-    p += struct.pack("<I", 150)
+    p += struct.pack("<I", 150) + bytes([62])
     t = decode(p)
     assert isinstance(t, Telemetry) and t.session == 1794100000 and t.temp_c == 24.16 and t.steps == 150
-    assert t.battery_soc == 87.25 and t.version == 3, t
+    assert t.battery_soc == 87.25 and t.version == 4 and t.heart_rate == 62, t
     # identity with the manual's example FDX-B tag 900002600096932
     packed = (900 << 38) | 2600096932
     i = decode(bytes([MAGIC, 0x81, 0x15, 0xB0, 0xB4]) + struct.pack("<I", 1794100000) + packed.to_bytes(6, "little"))

@@ -21,6 +21,9 @@
 #define REG_CNFG_EMUX   0x14
 #define REG_CNFG_ECG    0x15
 #define REG_ECG_FIFO    0x21
+#define REG_CNFG_RTOR1  0x1D
+#define REG_CNFG_RTOR2  0x1E
+#define REG_RTOR        0x25
 
 /* CNFG_GEN: EN_ECG (bit19), FMSTR=00 (32768 Hz -> 512 sps base), lead-off and bias off */
 #define GEN_EN_ECG      (1u << 19)
@@ -34,6 +37,13 @@
 /* CNFG_EMUX: OPENP[21], OPENN[20] (isolate electrodes), CALP_SEL[19:18]=10 VCALP, CALN_SEL[17:16]=11 VCALN */
 #define EMUX_TEST       ((1u << 21) | (1u << 20) | (2u << 18) | (3u << 16))
 #define EMUX_NORMAL     0u
+
+/* CNFG_RTOR1: datasheet defaults (WNDW 96 ms, RGAIN auto, PAVG 8, PTSF 4/16) + EN_RTOR[15] */
+#define RTOR1_CFG       ((3u << 20) | (0xFu << 16) | (1u << 15) | (2u << 12) | (3u << 8))
+/* CNFG_RTOR2: defaults (HOFF 32 x 7.8 ms = 250 ms, RAVG 8, RHSF 4/8) */
+#define RTOR2_CFG       ((32u << 16) | (2u << 12) | (4u << 8))
+#define STATUS_RRINT    (1u << 10)
+#define RTOR_LSB_US     7812.5   /* FMSTR = 32768 Hz: R-to-R resolution 7.8125 ms */
 
 /* ECG_FIFO word: data[23:6] (18-bit two's complement), ETAG[5:3] */
 #define ETAG_VALID      0
@@ -125,6 +135,8 @@ esp_err_t max30001_ecg_start(bool test_signal)
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_CAL, test_signal ? CAL_TEST : 0), TAG, "cal");
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_EMUX, test_signal ? EMUX_TEST : EMUX_NORMAL), TAG, "emux");
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_ECG, ECG_CFG), TAG, "ecg");
+    ESP_RETURN_ON_ERROR(wr(REG_CNFG_RTOR1, RTOR1_CFG), TAG, "rtor1");   /* heart-rate detector */
+    ESP_RETURN_ON_ERROR(wr(REG_CNFG_RTOR2, RTOR2_CFG), TAG, "rtor2");
     vTaskDelay(pdMS_TO_TICKS(50));
     ESP_RETURN_ON_ERROR(wr(REG_SYNCH, 0), TAG, "synch");         /* start conversions */
     ESP_RETURN_ON_ERROR(wr(REG_FIFO_RST, 0), TAG, "fifo_rst");
@@ -160,6 +172,24 @@ size_t max30001_ecg_read(int32_t *out, size_t max, bool *overflow)
         }
     }
     return n;
+}
+
+bool max30001_rtor_poll(uint32_t *rr_ms)
+{
+    uint32_t st = 0, v = 0;
+    if (rd(REG_STATUS, &st) != ESP_OK || !(st & STATUS_RRINT)) {   /* reading STATUS clears RRINT */
+        return false;
+    }
+    if (rd(REG_RTOR, &v) != ESP_OK) {
+        return false;
+    }
+    *rr_ms = (uint32_t)(((v >> 10) & 0x3FFF) * RTOR_LSB_US / 1000.0 + 0.5);
+    return true;
+}
+
+void max30001_fifo_reset(void)
+{
+    wr(REG_FIFO_RST, 0);
 }
 
 void max30001_stop(void)

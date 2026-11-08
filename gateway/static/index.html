@@ -98,6 +98,7 @@
     <div class="charts">
       <div class="chart"><h3>Battery</h3><div class="box"><canvas id="chBatt"></canvas></div></div>
       <div class="chart"><h3>Temperature &amp; humidity</h3><div class="box"><canvas id="chEnv"></canvas></div></div>
+      <div class="chart"><h3>Heart rate (bpm, median over each 30 s)</h3><div class="box"><canvas id="chHr"></canvas></div></div>
       <div class="chart"><h3>Activity (steps per interval)</h3><div class="box"><canvas id="chSteps"></canvas></div></div>
       <div class="chart"><h3>Reception (best RSSI and adverts heard per burst)</h3><div class="box"><canvas id="chRx"></canvas></div></div>
       <div class="chart ecgcard">
@@ -206,7 +207,7 @@ function renderDevices(devs) {
         <div class="stat"><div class="v">${fmt(d.temp_c, 1, "°C")}</div><div class="l">board temp</div></div>
         <div class="stat"><div class="v">${fmt(d.humidity, 0, "%")}</div><div class="l">humidity</div></div>
         <div class="stat"><div class="v">${fmt(d.steps)}</div><div class="l">steps since on</div></div>
-        <div class="stat"><div class="v">${fmt(d.rssi_best, 0)}</div><div class="l">RSSI dBm</div></div>
+        <div class="stat"><div class="v">${d.heart_rate ? d.heart_rate : "–"}</div><div class="l">heart rate bpm</div></div>
         <div class="stat"><div class="v">${Math.floor(d.uptime_min / 60)}h${String(d.uptime_min % 60).padStart(2, "0")}</div><div class="l">uptime</div></div>
       </div>
       <div class="horse">${horseLine(d)}</div>
@@ -343,6 +344,7 @@ async function loadDetail() {
   draw("chEnv", "line", [line("Temperature °C", "temp", css("--c2")), line("Humidity %RH", "rh", css("--c1"), "y1")],
        { y: { title: { display: true, text: "°C", color: css("--muted") } },
          y1: { position: "right", min: 0, max: 100, title: { display: true, text: "%RH", color: css("--muted") } } });
+  draw("chHr", "line", [line("Heart rate bpm", "hr", css("--bad"))], { y: { suggestedMin: 20, suggestedMax: 100 } });
   draw("chSteps", "bar", [{ label: "Steps", data: series(rows, "steps_delta"), backgroundColor: css("--c4"),
        barThickness: "flex", maxBarThickness: 8 }], { y: { beginAtZero: true } });
   draw("chRx", "line", [line("Best RSSI dBm", "rssi", css("--c1")),

@@ -4,7 +4,8 @@
  * SPI on GPIO39-42, powered by the two XC6221 1.8 V LDOs switched by VCC_CTRL (GPIO13),
  * clocked by the external 32.768 kHz oscillator (also on the 1.8 V rail).
  *
- * ECG is configured for 512 sps, gain 80 V/V, digital HPF 0.5 Hz, LPF 40 Hz.
+ * ECG is configured for 512 sps, gain 80 V/V, digital HPF 0.5 Hz, LPF 40 Hz, with the
+ * hardware R-to-R (heart-beat) detector enabled.
  */
 #include <stdbool.h>
 #include <stddef.h>
@@ -30,6 +31,13 @@ esp_err_t max30001_ecg_start(bool test_signal);
  * Sets *overflow if the FIFO overflowed (it is then reset; samples were lost).
  */
 size_t max30001_ecg_read(int32_t *out, size_t max, bool *overflow);
+
+/* If the R-to-R detector found a new beat since the last call, return the beat-to-beat
+ * interval in ms. Cheap (two 32-bit SPI reads); poll it a few times per second. */
+bool max30001_rtor_poll(uint32_t *rr_ms);
+
+/* Discard the ECG FIFO (heart-rate-only mode does not read it). */
+void max30001_fifo_reset(void);
 
 /* Stop conversions and reset the chip (before the rail is switched off). */
 void max30001_stop(void);

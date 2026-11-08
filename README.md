@@ -24,15 +24,16 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 |---|---|
 | Toolchain, secure boot, flash encryption | ✅ IDF 6.1, signed with the **spro** key, app-only encrypted flashing |
 | Power sequencing | ✅ Hold to power on (~1.5 s), long press to power off (2 s), charge-only deep sleep on USB |
-| LEDs | ✅ D1 breathes blue while on; D2 shows charge state (red/green/orange); both blink green while waiting for an RFID tag |
+| LEDs | ✅ D1 short blue blink every 5 s while on; D2 shows charge state (red/green/orange); both blink green while waiting for an RFID tag |
 | Sensors (30 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer), RTC (PCF85063A) |
 | GPS | ✅ Parked in backup mode at boot (`$PAIR650,0`, verified) |
-| BLE telemetry | ✅ Advert v2 every 30 s (2 s burst, +15 dBm), identity scan response |
+| BLE telemetry | ✅ Advert v4 every 30 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate; identity scan response |
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
 | Sessions + RFID HorseID | ✅ Session = Unix time at boot; tag scanned at boot (JY-LD6900, 9600 ASCII); per-session dashboard view |
-| Power optimisation (2e) | ⏳ **Next**: light sleep, current measurement, burst/TX-power tuning |
-| Heart rate / respiration in adverts | ⏳ Planned: MAX30001 hardware R-to-R detector, 3 spare advert bytes reserved |
+| Power optimisation (2e) | 🟡 Automatic light sleep done and verified on battery; drain estimate on the dashboard; **measuring overnight**. Burst/TX-power tuning after the range test |
+| Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
+| Respiration | ⏳ Planned (1 spare advert byte reserved) |
 | SD card EDF logging + Wi-Fi upload (phase 3) | ⏳ Not started |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
 
@@ -99,6 +100,10 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 - **`SPIRAM_MALLOC_RESERVE_INTERNAL`** must stay small (64 KB); 256 KB from the old config boot-looped.
 - **Serial monitor resets the board**: opening/closing COM3 toggles DTR/RTS and the auto-reset circuit
   reboots the device (it then falls into charge-only). Short sessions in the DB are often this, not a bug.
+- **Light sleep pitfalls (fixed, keep in mind):** ESP-IDF floats every GPIO in light sleep unless
+  `gpio_sleep_sel_dis()` is set, which would drop PMIC_EN and cut power; UARTs must be clocked from
+  XTAL (APB scales with DFS); an enabled RMT channel blocks sleep; FreeRTOS ticks lag in light
+  sleep, so use `esp_timer` for real-time deadlines and pulse timing.
 - **RTC oscillator-stop flag** was seen once after the RFID reader switched on (coin cell is fitted).
   Firmware tolerates it (plausible date still used) and the gateway re-syncs time. Measure the coin cell
   if it recurs.
@@ -107,10 +112,10 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Next steps
 
-1. **Phase 2e, power:** automatic light sleep between events (no 32 kHz crystal for the ESP32, so
-   measure what BLE sleep achieves), measure current on battery, shorten the 2 s burst (~18/20 adverts
-   arrive), tune TX power after the range test, decide breathing LED vs short pulse.
+1. **Phase 2e, power:** read the overnight drain estimate (dashboard card); then shorten the 2 s
+   burst (~18/20 adverts arrive) and tune TX power after the range test.
 2. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
-3. **Heart rate (and later respiration)** in the advert via the MAX30001 R-to-R detector.
+3. **Respiration** (MAX30001 BioZ or ECG-derived), and checking R-to-R detection on a horse ECG
+   (large T waves may need WNDW/PTSF tuning).
 4. **Phase 3:** 512 Hz ECG + 416 Hz IMU to SD in EDF; Wi-Fi upload while charging.
 5. Production items: SIG company ID, commercial gateway with BLE connection support (for ECG), AWS backend.
