@@ -34,6 +34,9 @@ esp_err_t sensors_init(void);
 
 void sensors_read(sensor_sample_t *s);
 
+/* Current RTC time as a UTC Unix timestamp. ESP_ERR_INVALID_STATE if the RTC lost its time. */
+esp_err_t sensors_get_epoch(uint32_t *epoch_utc);
+
 /* Set the RTC (and the ESP32 system clock) from a UTC Unix timestamp. */
 esp_err_t sensors_set_time(uint32_t epoch_utc);
 

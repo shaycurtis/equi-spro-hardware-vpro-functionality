@@ -26,7 +26,7 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
 from ecg_manager import EcgManager
-from equi_protocol import COMPANY_ID, Telemetry, decode
+from equi_protocol import COMPANY_ID, SESSION_RANDOM_BIT, Identity, Telemetry, decode
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -48,11 +48,23 @@ CREATE TABLE IF NOT EXISTS readings (
     rssi_best     INTEGER,
     packets       INTEGER,              -- adverts heard in this burst (range indicator)
     address       TEXT,
-    session       INTEGER               -- gateway run (start time); loss stats only compare within one
+    session       INTEGER,              -- gateway run (start time); loss stats only compare within one
+    device_session INTEGER,             -- device session ID (Unix time it started; bit 31 = random)
+    horse_id      TEXT                  -- 15-digit RFID of the horse for that session, if scanned
     -- No UNIQUE key: seq and uptime restart at every device boot, so they are not unique over
     -- time. Duplicate adverts within a burst are merged in memory before insert.
 );
 CREATE INDEX IF NOT EXISTS idx_readings_dev_time ON readings (device_id, received_at);
+CREATE TABLE IF NOT EXISTS device_sessions (
+    device_id     TEXT    NOT NULL,
+    session_id    INTEGER NOT NULL,     -- as sent by the device
+    horse_id      TEXT,
+    started_at    TEXT,                 -- ISO-8601 UTC from session_id (NULL if the ID is random)
+    first_seen    TEXT    NOT NULL,
+    last_seen     TEXT    NOT NULL,
+    readings      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, session_id)
+);
 """
 
 
@@ -71,17 +83,21 @@ class Gateway:
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")   # web app reads while we write
         self.db.executescript(SCHEMA)
-        try:   # databases created before the session column existed
-            self.db.execute("ALTER TABLE readings ADD COLUMN session INTEGER")
-        except sqlite3.OperationalError:
-            pass
+        for col in ("session INTEGER", "device_session INTEGER", "horse_id TEXT"):
+            try:   # databases created before these columns existed
+                self.db.execute(f"ALTER TABLE readings ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         self._drop_old_unique_key()
         self.session = int(time.time())
         self.verbose = verbose
         self.lock = threading.Lock()   # the DB connection is shared with web-request threads
         self.ecg = EcgManager(self.db, self.lock)
-        self.current: dict[str, tuple[int, int, int]] = {}   # device -> (seq, uptime, row id)
+        self.current: dict[str, tuple[tuple, int]] = {}   # device -> (burst key, row id)
         self.stats: dict[str, DeviceStats] = {}
+        self.identity: dict[str, tuple[int, str | None]] = {}   # device -> (session, horse_id)
+        self.ecg.identity = self.identity
+        self.last_time_sync: dict[str, float] = {}
 
     def _drop_old_unique_key(self) -> None:
         """Early databases had UNIQUE(device_id, seq, uptime_min), which silently dropped readings
@@ -128,29 +144,32 @@ class Gateway:
         t = decode(payload)
         if t is None:
             return
+        self.ecg.addresses[t.device_id] = address
+        if isinstance(t, Identity):
+            self.on_identity(t)
+            return
         if self.verbose:
             print(f"  adv {t.device_id} seq={t.seq} rssi={rssi}")
-        self.ecg.addresses[t.device_id] = address
 
-        key = (t.seq, t.uptime_min)
+        key = (t.session, t.seq, t.uptime_min)
         cur = self.current.get(t.device_id)
         st = self.stats.setdefault(t.device_id, DeviceStats())
-        if cur and (cur[0], cur[1]) == key:
+        if cur and cur[0] == key:
             # Another advert from the same burst: update reception stats only.
             st.packets += 1
             st.rssi.append(rssi)
             with self.lock:
                 self.db.execute(
                     "UPDATE readings SET packets = packets + 1, rssi_best = MAX(rssi_best, ?) WHERE id = ?",
-                    (rssi, cur[2]),
+                    (rssi, cur[1]),
                 )
                 self.db.commit()
             return
 
-        # New burst = new reading.
-        if st.last_seq is not None:
+        # New burst = new reading. Seq gaps only count as losses within one device session.
+        if st.last_seq is not None and cur and cur[0][0] == t.session:
             gap = (t.seq - st.last_seq) % 256
-            if gap > 1 and t.uptime_min >= (cur[1] if cur else 0):
+            if gap > 1:
                 st.missed += gap - 1
         st.last_seq = t.seq
         st.bursts += 1
@@ -158,8 +177,48 @@ class Gateway:
         st.rssi.append(rssi)
 
         row_id = self.store(t, rssi, address)
-        self.current[t.device_id] = (t.seq, t.uptime_min, row_id)
-        self.print_reading(t, rssi)
+        self.current[t.device_id] = (key, row_id)
+        self.print_reading(t, rssi, self.horse_for(t))
+        if not t.rtc_valid:
+            self.maybe_sync_time(t.device_id)
+
+    def horse_for(self, t: Telemetry) -> str | None:
+        ident = self.identity.get(t.device_id)
+        return ident[1] if ident and ident[0] == t.session else None
+
+    def on_identity(self, i: Identity) -> None:
+        prev = self.identity.get(i.device_id)
+        self.identity[i.device_id] = (i.session, i.horse_id)
+        if prev == (i.session, i.horse_id):
+            return
+        print(f"{datetime.now():%H:%M:%S}  {i.device_id}  session {i.session}  HorseID {i.horse_id or '(not scanned)'}")
+        with self.lock:
+            self._touch_session(i.device_id, i.session, count=False)
+            if i.horse_id:
+                self.db.execute("UPDATE device_sessions SET horse_id = ? WHERE device_id = ? AND session_id = ?",
+                                (i.horse_id, i.device_id, i.session))
+                # Readings that arrived before the scan response get the HorseID too.
+                self.db.execute("UPDATE readings SET horse_id = ? WHERE device_id = ? AND device_session = ? "
+                                "AND horse_id IS NULL", (i.horse_id, i.device_id, i.session))
+            self.db.commit()
+
+    def _touch_session(self, device_id: str, session: int, count: bool) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if session & SESSION_RANDOM_BIT:
+            started = None
+        else:
+            started = datetime.fromtimestamp(session, timezone.utc).isoformat(timespec="seconds")
+        self.db.execute(
+            "INSERT INTO device_sessions (device_id, session_id, started_at, first_seen, last_seen, readings) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT (device_id, session_id) DO UPDATE SET last_seen = excluded.last_seen, "
+            "readings = readings + excluded.readings", (device_id, session, started, now, now, 1 if count else 0))
+
+    def maybe_sync_time(self, device_id: str) -> None:
+        """Device RTC has no time: set it from the PC (at most every 10 min per device)."""
+        if self.ecg.serial is None or time.time() - self.last_time_sync.get(device_id, 0) < 600:
+            return
+        self.last_time_sync[device_id] = time.time()
+        self.ecg.sync_time(device_id)
 
     def store(self, t: Telemetry, rssi: int, address: str) -> int:
         r = t.to_record()
@@ -167,21 +226,28 @@ class Gateway:
             return self._insert(t, r, rssi, address)
 
     def _insert(self, t: Telemetry, r: dict, rssi: int, address: str) -> int:
+        uptime = r["uptime_min"]
+        if uptime is None:   # v2: derive from the session start when it is a real timestamp
+            sess = r["session"]
+            uptime = 0 if sess is None or sess & SESSION_RANDOM_BIT else max(0, int(time.time() - sess) // 60)
         cur = self.db.execute(
             """INSERT INTO readings
                (received_at, device_id, seq, uptime_min, battery_soc, battery_mv, temp_c, humidity,
-                steps, usb, charging, charge_full, charger_fault, rtc_valid, rssi_best, packets, address, session)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+                steps, usb, charging, charge_full, charger_fault, rtc_valid, rssi_best, packets, address, session,
+                device_session, horse_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(timespec="seconds"), r["device_id"], r["seq"],
-             r["uptime_min"], r["battery_soc"], r["battery_mv"], r["temp_c"], r["humidity"], r["steps"],
+             uptime, r["battery_soc"], r["battery_mv"], r["temp_c"], r["humidity"], r["steps"],
              r["usb"], r["charging"], r["charge_full"], r["charger_fault"], r["rtc_valid"], rssi, address,
-             self.session),
+             self.session, r["session"], self.horse_for(t)),
         )
+        if r["session"] is not None:
+            self._touch_session(r["device_id"], r["session"], count=True)
         self.db.commit()
         return cur.lastrowid
 
     @staticmethod
-    def print_reading(t: Telemetry, rssi: int) -> None:
+    def print_reading(t: Telemetry, rssi: int, horse: str | None = None) -> None:
         def f(v, fmt, unit=""):
             return "n/a" if v is None else f"{v:{fmt}}{unit}"
 
@@ -190,7 +256,7 @@ class Gateway:
         now = datetime.now().strftime("%H:%M:%S")
         print(f"{now}  {t.device_id}  seq {t.seq:3d}  batt {f(t.battery_soc, 'd', '%')} {f(t.battery_mv, 'd', 'mV')}"
               f"  {f(t.temp_c, '.2f', 'C')} {f(t.humidity, '.1f', '%RH')}  steps {f(t.steps, 'd')}"
-              f"  {charge:8s}  up {t.uptime_min}m  rssi {rssi} dBm")
+              f"  {charge:8s}  {'RFID scan  ' if t.rfid_scanning else ''}horse {horse or '-'}  rssi {rssi} dBm")
 
     def print_summary(self) -> None:
         for dev, st in self.stats.items():

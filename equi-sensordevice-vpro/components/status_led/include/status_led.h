@@ -26,11 +26,13 @@ typedef struct { uint8_t r, g, b; } led_colour_t;
 #define LED_IDX_CHARGE  1   /* D2: charge state */
 
 #define LED_BREATHE_PERIOD_MS  4000
+#define LED_BLINK_PERIOD_MS    500
 
 typedef enum {
     LED_MODE_OFF = 0,
     LED_MODE_SOLID,
     LED_MODE_BREATHE,
+    LED_MODE_BLINK,         /* 2 Hz on/off, phase-locked across LEDs so they flash together */
 } led_mode_t;
 
 esp_err_t status_led_init(void);

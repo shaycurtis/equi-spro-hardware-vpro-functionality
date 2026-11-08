@@ -1,13 +1,14 @@
 /*
  * Equimetrics BLE gateway receiver.
  *
- * Scans continuously (100 % duty, passive, no duplicate filtering) and forwards every
- * Equimetrics telemetry advert over the USB serial console. On request from the PC it
+ * Scans continuously (100 % duty, active, no duplicate filtering) and forwards every
+ * Equimetrics telemetry advert and identity scan response over the USB serial console. On request from the PC it
  * connects to one device for an ECG capture and/or to set its clock.
  *
  * Device -> PC lines:
  *   EQRX,ready
- *   EQADV,<addr>,<rssi>,<payload hex>      telemetry advert (payload after the company ID)
+ *   EQADV,<addr>,<rssi>,<payload hex>      advert or scan response (payload after the company ID;
+ *                                          E9 02.. = telemetry, E9 81.. = identity)
  *   EQHB,<uptime_s>,<adverts_forwarded>    heartbeat every 10 s
  *   EQECG,<event>,<addr>[,detail]          session events: WAIT CONN MTU READY TIMESET STARTED
  *                                          END DISC TIMEOUT BUSY ERR
@@ -310,7 +311,7 @@ static void start_scan(void)
         .itvl = BLE_GAP_SCAN_ITVL_MS(100),
         .window = BLE_GAP_SCAN_ITVL_MS(100),   /* window == interval: listen 100 % of the time */
         .filter_duplicates = 0,
-        .passive = 1,
+        .passive = 0,                          /* active: also collect the identity scan response */
     };
     int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &p, gap_event, NULL);
     if (rc != 0) {

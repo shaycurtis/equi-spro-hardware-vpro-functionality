@@ -26,6 +26,41 @@ esp_err_t sensors_init(void)
     s_th  = try_init("SHTC3", shtc3_init);
     s_imu = try_init("LSM6DSOX", lsm6dsox_init);
     s_rtc = try_init("PCF85063A", pcf85063_init);
+
+    /* System clock from the RTC, so log timestamps and session IDs are wall-clock time. */
+    uint32_t epoch;
+    if (sensors_get_epoch(&epoch) == ESP_OK) {
+        struct timeval tv = { .tv_sec = epoch };
+        settimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "system time set from RTC: %lu", (unsigned long)epoch);
+    } else {
+        ESP_LOGW(TAG, "RTC has no time (lost power); the gateway will set it");
+    }
+    return ESP_OK;
+}
+
+esp_err_t sensors_get_epoch(uint32_t *epoch_utc)
+{
+    struct tm tm;
+    bool valid = false;
+    if (!s_rtc || pcf85063_read(&tm, &valid) != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    /* After a real power loss the PCF85063A restarts at 2000-01-01, so a plausible date means
+     * the time is still usable even if the oscillator-stop flag is set (a brief stop only
+     * loses seconds). The flag is still reported as "RTC not valid", so the gateway re-syncs. */
+    if (tm.tm_year < 124) {               /* before 2024: really lost */
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!valid) {
+        ESP_LOGW(TAG, "RTC oscillator-stop flag set but date is plausible; using it");
+    }
+    tm.tm_isdst = 0;
+    time_t t = mktime(&tm);              /* TZ is UTC (unset), so mktime == timegm */
+    if (t < 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    *epoch_utc = (uint32_t)t;
     return ESP_OK;
 }
 

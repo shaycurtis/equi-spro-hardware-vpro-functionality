@@ -14,7 +14,8 @@
  * Behaviour:
  *   - Power on:  hold the button for ~1.5 s (POWER_HOLD_ON_MS after firmware start).
  *                Released earlier -> board turns itself off again.
- *   - Running:   D1 breathes blue ("device on"); D2 shows charge state when USB present.
+ *   - Running:   the app owns D1 (e.g. breathing blue); D2 shows charge state when USB present
+ *                unless the app takes it over with power_set_charge_led(false).
  *   - USB plugged into an off device -> charge-only mode: D1 dark, D2 red = charging,
  *                green = full, orange = charger fault; deep sleep, re-checked every
  *                POWER_CHARGE_POLL_S. A button hold from here powers fully on.
@@ -48,6 +49,9 @@ void power_boot(void);
 
 /* Start the power task (power-button long-press, charge LED). */
 void power_start(void);
+
+/* Let the power task show the charge state on D2 (default), or leave D2 to the app. */
+void power_set_charge_led(bool enable);
 
 /* Register a callback run (in reverse registration order) during shutdown. */
 void power_register_shutdown_cb(power_shutdown_cb_t cb);

@@ -4,6 +4,10 @@
  * Phase 1: power sequencing (power.h).
  * Phase 2a: slow sensors sampled every 30 s (sensors.h), GNSS parked in backup mode.
  * Phase 2b: each sample is broadcast as a BLE advert burst (telemetry.h).
+ * Phase 2d: on-demand ECG over BLE (ecg.h, telemetry/ecg_service.h).
+ * Sessions: each boot starts a session (ID = Unix time). At boot the RFID reader waits for
+ * the horse's tag (both LEDs flash green); the tag becomes the session's HorseID. A short
+ * press of the scan button (SW1) scans again; a different horse starts a new session.
  */
 #include <math.h>
 #include <stdio.h>
@@ -11,18 +15,28 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "esp_ota_ops.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "device_id.h"
 #include "ecg.h"
 #include "gnss.h"
+#include "board.h"
 #include "power.h"
+#include "rfid.h"
 #include "sensors.h"
 #include "status_led.h"
 #include "telemetry.h"
 
 #define SAMPLE_PERIOD_S  30
 #define ADV_BURST_MS     2000   /* 20 adverts at 100 ms; tune down once gateway reception is known */
+#define RFID_TIMEOUT_S   120    /* how long to wait for a tag before carrying on without one */
+
+static uint32_t s_dev_id;
+static volatile uint32_t s_session;
+static volatile uint64_t s_horse;      /* ISO 11784 packed, 0 = none */
+static volatile bool s_scanning;
 
 static const char *TAG = "main";
 
@@ -83,23 +97,103 @@ static void log_sample(const sensor_sample_t *s)
              charge_str(power_charge_state()), rtc);
 }
 
+/* ------------------------------------------------------------ sessions */
+
+static uint32_t new_session_id(void)
+{
+    uint32_t epoch;
+    if (sensors_get_epoch(&epoch) == ESP_OK) {
+        return epoch & 0x7FFFFFFF;
+    }
+    return esp_random() | 0x80000000u;   /* RTC has no time: random, flagged by bit 31 */
+}
+
+static void publish_identity(void)
+{
+    telemetry_ble_set_identity(s_dev_id, s_session, s_horse);
+}
+
+static void show_running_leds(void)
+{
+    status_led_set_mode(LED_IDX_STATUS, LED_MODE_BREATHE, LED_RUNNING);
+    status_led_set_mode(LED_IDX_CHARGE, LED_MODE_OFF, LED_OFF);
+    power_set_charge_led(true);          /* D2 back to the charge state (off unless on USB) */
+}
+
+static void on_tag(const rfid_tag_t *tag, void *ctx)
+{
+    if (tag) {
+        uint64_t packed = rfid_tag_pack(tag);
+        char str[16];
+        rfid_tag_str(tag, str);
+        if (s_horse && packed != s_horse) {
+            s_session = new_session_id();
+            ESP_LOGI(TAG, "different horse: new session %lu", (unsigned long)s_session);
+        }
+        s_horse = packed;
+        ESP_LOGI(TAG, "HorseID %s (session %lu)", str, (unsigned long)s_session);
+        publish_identity();
+    } else {
+        ESP_LOGW(TAG, "no tag scanned; continuing%s", s_horse ? " with the previous HorseID" : " without a HorseID");
+    }
+    s_scanning = false;
+    show_running_leds();
+}
+
+static void start_rfid_scan(void)
+{
+    if (rfid_scanning()) {
+        return;
+    }
+    power_set_charge_led(false);         /* both LEDs are the "scan a tag" prompt */
+    status_led_set_mode(LED_IDX_STATUS, LED_MODE_BLINK, LED_GREEN);
+    status_led_set_mode(LED_IDX_CHARGE, LED_MODE_BLINK, LED_GREEN);
+    s_scanning = true;
+    if (rfid_scan_start(RFID_TIMEOUT_S, on_tag, NULL) != ESP_OK) {
+        s_scanning = false;
+        show_running_leds();
+    }
+}
+
+/* SW1: active low with a 10k pull-up. A short press starts a new tag scan. */
+static void scan_button_task(void *arg)
+{
+    gpio_config_t io = { .pin_bit_mask = BIT64(BOARD_PIN_SCAN_BTN), .mode = GPIO_MODE_INPUT };
+    gpio_config(&io);
+    int low_ms = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (gpio_get_level(BOARD_PIN_SCAN_BTN) == 0) {
+            if ((low_ms += 50) == 100) {     /* debounced press */
+                ESP_LOGI(TAG, "scan button pressed");
+                start_rfid_scan();
+            }
+        } else {
+            low_ms = 0;
+        }
+    }
+}
+
+/* ----------------------------------------------------------- telemetry */
+
 static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *t)
 {
     power_charge_t c = power_charge_state();
     *t = (telemetry_t){
-        .device_id = strtoul(device_id_get(), NULL, 16) & 0xFFFFFF,
+        .device_id = s_dev_id,
+        .session = s_session,
         .seq = seq,
         .flags = (c != POWER_CHARGE_NO_USB ? TELEM_FLAG_USB : 0) |
                  (c == POWER_CHARGE_CHARGING ? TELEM_FLAG_CHARGING : 0) |
                  (c == POWER_CHARGE_DONE ? TELEM_FLAG_FULL : 0) |
                  (c == POWER_CHARGE_FAULT ? TELEM_FLAG_FAULT : 0) |
-                 (s->rtc_ok && s->rtc_valid ? TELEM_FLAG_RTC_VALID : 0),
+                 (s->rtc_ok && s->rtc_valid ? TELEM_FLAG_RTC_VALID : 0) |
+                 (s_scanning ? TELEM_FLAG_RFID_SCAN : 0),
         .battery_soc = s->fg_ok ? (uint8_t)(s->batt_soc > 100.0f ? 100 : s->batt_soc + 0.5f) : 0xFF,
         .battery_mv = s->fg_ok ? s->batt_mv : 0,
         .temp_c100 = s->th_ok ? (int16_t)lroundf(s->temp_c * 100.0f) : 0x7FFF,
         .humidity_half = s->th_ok ? (uint8_t)lroundf(s->rh * 2.0f) : 0xFF,
         .steps = s->imu_ok ? s->steps : 0xFFFFFFFF,
-        .uptime_min = (uint16_t)(esp_timer_get_time() / 60000000LL),
     };
 }
 
@@ -141,16 +235,24 @@ void app_main(void)
     confirm_ota_image();
     power_start();
 
-    device_id_get();
+    s_dev_id = strtoul(device_id_get(), NULL, 16) & 0xFFFFFF;
     gnss_standby_async();
     ESP_ERROR_CHECK(sensors_init());
     power_register_shutdown_cb(sensors_shutdown);
 
+    s_session = new_session_id();
+    ESP_LOGI(TAG, "session %lu%s", (unsigned long)s_session, (s_session & 0x80000000u) ? " (random: RTC not set)" : "");
+
     char name[24];
     snprintf(name, sizeof(name), "EQ-%s", device_id_get());
     ESP_ERROR_CHECK(telemetry_ble_init(name));
+    publish_identity();
     power_register_shutdown_cb(telemetry_ble_stop);
     power_register_shutdown_cb(ecg_shutdown);
+    power_register_shutdown_cb(rfid_shutdown);
+
+    start_rfid_scan();                   /* "scan the horse's tag" */
+    xTaskCreate(scan_button_task, "scan_btn", 2560, NULL, 3, NULL);
 
 #if ECG_BOOT_SELFTEST
     ecg_request_t req = { .seconds = 3, .test_signal = true, .on_block = selftest_block };

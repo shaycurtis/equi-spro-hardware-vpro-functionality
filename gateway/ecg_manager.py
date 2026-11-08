@@ -74,7 +74,13 @@ class EcgManager:
         self.lock = lock
         with self.lock:
             self.db.executescript(ECG_SCHEMA)
+            for col in ("device_session INTEGER", "horse_id TEXT"):
+                try:
+                    self.db.execute(f"ALTER TABLE ecg_captures ADD COLUMN {col}")
+                except Exception:
+                    pass   # already there
         self.addresses: dict[str, str] = {}   # device_id -> BLE address (from adverts)
+        self.identity: dict[str, tuple] = {}  # device_id -> (session, horse_id); set by the gateway
         self.serial = None                    # set by the gateway in --serial mode
         self.active: Capture | None = None
         self.recent: dict[int, Capture] = {}
@@ -89,10 +95,12 @@ class EcgManager:
         if not addr:
             raise RuntimeError(f"no BLE address known for {device_id} yet")
         seconds = max(1, min(60, int(seconds)))
+        session, horse = self.identity.get(device_id, (None, None))
         with self.lock:
             cur = self.db.execute(
-                "INSERT INTO ecg_captures (device_id, requested_at, seconds, test_signal, status, detail) "
-                "VALUES (?,?,?,?,?,?)", (device_id, now_iso(), seconds, int(test), "waiting", None))
+                "INSERT INTO ecg_captures (device_id, requested_at, seconds, test_signal, status, detail, "
+                "device_session, horse_id) VALUES (?,?,?,?,?,?,?,?)",
+                (device_id, now_iso(), seconds, int(test), "waiting", None, session, horse))
             self.db.commit()
             cap = Capture(cur.lastrowid, device_id, addr, seconds, test)
             self.active = cap
@@ -101,6 +109,20 @@ class EcgManager:
             self.serial.flush()
         print(f"ECG #{cap.id}: requested {seconds} s from {device_id} ({addr}){' [test signal]' if test else ''}")
         return cap.public()
+
+    def sync_time(self, device_id: str) -> bool:
+        """Set a device's RTC from the PC clock (connect, set time, disconnect). Skipped while a
+        capture is in progress (the receiver handles one connection at a time)."""
+        if self.serial is None or (self.active and self.active.status not in FINAL):
+            return False
+        addr = self.addresses.get(device_id)
+        if not addr:
+            return False
+        with self.lock:
+            self.serial.write(f"ECG,{addr},0,0,{int(time.time())}\n".encode())
+            self.serial.flush()
+        print(f"{device_id}: RTC not set on the device - sending the time")
+        return True
 
     def _last_address(self, device_id: str) -> str | None:
         with self.lock:

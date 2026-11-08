@@ -42,6 +42,8 @@ static led_colour_t compute(const led_state_t *l, uint32_t t_ms)
         k = BREATHE_FLOOR + (1.0f - BREATHE_FLOOR) * k * k;   /* rough gamma */
         return (led_colour_t){ scale(l->c.r, k), scale(l->c.g, k), scale(l->c.b, k) };
     }
+    case LED_MODE_BLINK:
+        return (t_ms % LED_BLINK_PERIOD_MS) < LED_BLINK_PERIOD_MS / 2 ? l->c : LED_OFF;
     default:
         return LED_OFF;
     }
@@ -60,7 +62,7 @@ static bool render_locked(void)
             out[i] = s_override_c;
         } else {
             out[i] = compute(&s_led[i], t_ms);
-            animating |= (s_led[i].mode == LED_MODE_BREATHE);
+            animating |= (s_led[i].mode == LED_MODE_BREATHE || s_led[i].mode == LED_MODE_BLINK);
         }
         if (memcmp(&out[i], &s_shown[i], sizeof(out[i])) != 0) {
             changed = true;

@@ -60,17 +60,26 @@ def api_devices(db: Path) -> list[dict]:
         # same gateway run AND the same device boot (uptime not reset). Gaps while the gateway or
         # the device was off are not reception problems, so they are not counted.
         rows = query(db, f"""
-            SELECT seq, uptime_min, session FROM readings
+            SELECT seq, uptime_min, session, device_session FROM readings
             WHERE device_id = ? AND {EPOCH} >= ? ORDER BY id""", (d["device_id"], now - 3600))
         missed = 0
         for a, b in zip(rows, rows[1:]):
-            if a["session"] is None or a["session"] != b["session"] or b["uptime_min"] < a["uptime_min"]:
-                continue
+            if a["session"] is None or a["session"] != b["session"]:
+                continue   # gateway restarted in between
+            if a["device_session"] is not None or b["device_session"] is not None:
+                if a["device_session"] != b["device_session"]:
+                    continue   # device rebooted / new horse session
+            elif b["uptime_min"] < a["uptime_min"]:
+                continue       # v1 firmware: uptime reset = reboot
             gap = (b["seq"] - a["seq"]) % 256
             if 1 < gap <= MAX_GAP:
                 missed += gap - 1
         expected = s["n"] + missed
         d["age_s"] = now - d["t"]
+        ds = d.get("device_session")
+        sess = query(db, "SELECT started_at, horse_id, readings FROM device_sessions WHERE device_id = ? AND session_id = ?",
+                     (d["device_id"], ds)) if ds is not None else []
+        d["device_session_info"] = sess[0] if sess else None
         d["online"] = d["age_s"] < 3 * SAMPLE_PERIOD_S
         d["hour"] = {
             "readings": s["n"],

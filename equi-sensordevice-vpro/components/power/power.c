@@ -29,6 +29,7 @@ static int s_ncbs;
 static TaskHandle_t s_task;
 static bool s_resume;
 static volatile power_charge_t s_charge;
+static volatile bool s_charge_led = true;   /* false while the app uses D2 (e.g. RFID prompt) */
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -279,12 +280,20 @@ void power_shutdown(void)
         s_cbs[i]();
     }
     rails_off();
-    status_led_set_mode(LED_IDX_STATUS, LED_MODE_OFF, LED_OFF);  /* stop the "on" breathe */
+    /* Stop the "on" breathe / any app pattern; charge-only mode re-applies D2 if on USB. */
+    status_led_set_mode(LED_IDX_STATUS, LED_MODE_OFF, LED_OFF);
+    status_led_set_mode(LED_IDX_CHARGE, LED_MODE_OFF, LED_OFF);
     status_led_flash(LED_ORANGE, 3, 100, 100);
     power_off_now();
 }
 
 /* -------------------------------------------------------------- run task */
+
+static void apply_charge_led(void)
+{
+    status_led_set_mode(LED_IDX_CHARGE, s_charge == POWER_CHARGE_NO_USB ? LED_MODE_OFF : LED_MODE_SOLID,
+                        charge_colour(s_charge));
+}
 
 static void IRAM_ATTR btn_isr(void *arg)
 {
@@ -332,20 +341,29 @@ static void power_task(void *arg)
         if (c != s_charge) {
             ESP_LOGI(TAG, "Charge state: %s", charge_name(c));
             s_charge = c;
-            status_led_set_mode(LED_IDX_CHARGE,
-                                c == POWER_CHARGE_NO_USB ? LED_MODE_OFF : LED_MODE_SOLID,
-                                charge_colour(c));
+            if (s_charge_led) {
+                apply_charge_led();
+            }
         }
+    }
+}
+
+void power_set_charge_led(bool enable)
+{
+    s_charge_led = enable;
+    if (enable) {
+        apply_charge_led();
     }
 }
 
 void power_start(void)
 {
-    status_led_set_mode(LED_IDX_STATUS, LED_MODE_BREATHE, LED_RUNNING);  /* D1: "device on" */
     /* Initial charge state so readers don't see "no USB" before the task's first poll. */
     if (power_usb_present()) {
         s_charge = gpio_get_level(BOARD_PIN_CHG_IND) ? POWER_CHARGE_DONE : POWER_CHARGE_CHARGING;
-        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, charge_colour(s_charge));
+    }
+    if (s_charge_led) {
+        apply_charge_led();
     }
     xTaskCreate(power_task, "power", 3072, NULL, 10, &s_task);
     gpio_set_intr_type(BOARD_PIN_PWR_BTN, GPIO_INTR_ANYEDGE);

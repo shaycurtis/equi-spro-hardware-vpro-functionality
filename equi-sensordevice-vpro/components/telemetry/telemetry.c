@@ -12,6 +12,9 @@
 static const char *TAG = "telemetry";
 
 static uint8_t s_own_addr_type;
+static char s_name[24];
+static uint8_t s_rsp[31];
+static size_t s_rsp_len;
 static volatile bool s_synced;
 
 /* ------------------------------------------------------------------ encode */
@@ -26,14 +29,14 @@ void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN])
     out[2] = (t->device_id >> 16) & 0xff;
     out[3] = (t->device_id >> 8) & 0xff;
     out[4] = t->device_id & 0xff;
-    out[5] = t->seq;
-    out[6] = t->flags;
-    out[7] = t->battery_soc;
-    put16(&out[8], t->battery_mv);
-    put16(&out[10], (uint16_t)t->temp_c100);
-    out[12] = t->humidity_half;
-    put32(&out[13], t->steps);
-    put16(&out[17], t->uptime_min);
+    put32(&out[5], t->session);
+    out[9] = t->seq;
+    out[10] = t->flags;
+    out[11] = t->battery_soc;
+    put16(&out[12], t->battery_mv);
+    put16(&out[14], (uint16_t)t->temp_c100);
+    out[16] = t->humidity_half;
+    put32(&out[17], t->steps);
 }
 
 /* --------------------------------------------------------------------- BLE */
@@ -96,6 +99,7 @@ esp_err_t telemetry_ble_init(const char *name)
     ble_hs_cfg.reset_cb = on_reset;
     ble_svc_gap_init();
     ble_svc_gap_device_name_set(name);
+    strncpy(s_name, name, sizeof(s_name) - 1);
     int rc = ecg_service_register();
     if (rc != 0) {
         ESP_LOGE(TAG, "ECG service register rc=%d", rc);
@@ -131,6 +135,12 @@ esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int 
         ESP_LOGE(TAG, "adv_set_data rc=%d", rc);
         return ESP_FAIL;
     }
+    if (s_rsp_len) {
+        rc = ble_gap_adv_rsp_set_data(s_rsp, (int)s_rsp_len);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "adv_rsp_set_data rc=%d", rc);
+        }
+    }
     struct ble_gap_adv_params p = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,    /* connectable: the gateway connects for ECG / time */
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
@@ -143,6 +153,38 @@ esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int 
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint64_t horse_id)
+{
+    uint8_t *r = s_rsp;
+    size_t n = 0;
+    r[n++] = 1 + 2 + TELEMETRY_IDENTITY_LEN;
+    r[n++] = BLE_HS_ADV_TYPE_MFG_DATA;
+    r[n++] = TELEMETRY_COMPANY_ID & 0xff;
+    r[n++] = TELEMETRY_COMPANY_ID >> 8;
+    r[n++] = TELEMETRY_MAGIC;
+    r[n++] = TELEMETRY_IDENTITY;
+    r[n++] = (device_id >> 16) & 0xff;
+    r[n++] = (device_id >> 8) & 0xff;
+    r[n++] = device_id & 0xff;
+    put32(&r[n], session);
+    n += 4;
+    for (int i = 0; i < 6; i++) {
+        r[n++] = (uint8_t)(horse_id >> (8 * i));
+    }
+    size_t name_len = strlen(s_name);
+    if (name_len && n + 2 + name_len <= sizeof(s_rsp)) {
+        r[n++] = (uint8_t)(1 + name_len);
+        r[n++] = BLE_HS_ADV_TYPE_COMP_NAME;
+        memcpy(&r[n], s_name, name_len);
+        n += name_len;
+    }
+    s_rsp_len = n;
+    if (!s_synced) {
+        return ESP_OK;   /* applied on the next burst */
+    }
+    return ble_gap_adv_rsp_set_data(s_rsp, (int)s_rsp_len) == 0 ? ESP_OK : ESP_FAIL;
 }
 
 void telemetry_ble_stop(void)

@@ -44,6 +44,8 @@
   .batt { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 4px; }
   .batt i { display: block; height: 100%; background: var(--ok); }
   .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .horse { margin-top: 10px; font-size: 13px; }
+  .horse b { letter-spacing: .03em; font-variant-numeric: tabular-nums; }
   .rx { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
   .detail h2 { font-size: 16px; margin: 28px 0 12px; }
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 12px; }
@@ -125,6 +127,14 @@ function chargeLabel(d) {
   return ["on battery", css("--muted")];
 }
 
+function horseLine(d) {
+  const h = d.horse_id || d.device_session_info?.horse_id;
+  const horse = h ? `Horse <b>${h.slice(0, 3)} ${h.slice(3)}</b>` : `<span class="muted">No horse scanned</span>`;
+  const st = d.device_session_info?.started_at;
+  const since = st ? ` · session since ${new Date(st).toLocaleString([], { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })}` : "";
+  return horse + `<span class="muted">${since}</span>`;
+}
+
 function renderRanges() {
   const el = document.getElementById("ranges");
   el.innerHTML = "";
@@ -166,6 +176,7 @@ function renderDevices(devs) {
         <div class="stat"><div class="v">${fmt(d.rssi_best, 0)}</div><div class="l">RSSI dBm</div></div>
         <div class="stat"><div class="v">${Math.floor(d.uptime_min / 60)}h${String(d.uptime_min % 60).padStart(2, "0")}</div><div class="l">uptime</div></div>
       </div>
+      <div class="horse">${horseLine(d)}</div>
       <div class="rx">Last seen ${ago(d.age_s)} · last hour: ${h.readings}/${h.expected} readings,
         ${fmt(h.adverts_per_burst, 1)} adverts/burst, avg RSSI ${fmt(h.rssi)} dBm</div>`;
     card.onclick = () => { selected = d.device_id; localStorageSet("device", selected); ecgShown = null;

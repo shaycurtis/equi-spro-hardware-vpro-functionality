@@ -1,28 +1,36 @@
 #pragma once
 /*
- * Telemetry advert, format version 1.
+ * Telemetry adverts, format version 2.
  *
- * Sent as BLE legacy, connectable advertising (1M PHY; the gateway connects only for ECG / time-set) so any scanner or
- * commercial gateway can forward it. The AD structure is Manufacturer Specific Data
- * (type 0xFF) with company ID 0xFFFF (Bluetooth SIG "test / not assigned" - replace
- * with an Equimetrics company ID for production).
+ * Sent as BLE legacy, connectable advertising (1M PHY; the gateway connects only for ECG /
+ * time-set) so any scanner or commercial gateway can forward it. Both records are
+ * Manufacturer Specific Data (type 0xFF) with company ID 0xFFFF (Bluetooth SIG "test / not
+ * assigned" - replace with an Equimetrics company ID for production).
  *
- * Payload after the company ID (19 bytes, little-endian unless noted):
+ * ADVERT - live data, every 30 s (21 bytes after the company ID, little-endian unless noted):
  *   off len field
  *    0   1  magic        0xE9
- *    1   1  version      0x01
+ *    1   1  version      0x02
  *    2   3  device_id    24-bit, BIG-endian (so 0x15B0B4 reads as "15B0B4")
- *    5   1  seq          increments every sample (gateway de-duplicates on this)
- *    6   1  flags        bit0 USB present, bit1 charging, bit2 charge full,
- *                        bit3 charger fault, bit4 RTC time valid
- *    7   1  battery_soc  % (0..100), 0xFF = n/a
- *    8   2  battery_mv   mV, 0 = n/a
- *   10   2  temp         int16, 0.01 degC, 0x7FFF = n/a
- *   12   1  humidity     0.5 %RH steps (0..200), 0xFF = n/a
- *   13   4  steps        uint32 since power-on, 0xFFFFFFFF = n/a
- *   17   2  uptime       minutes since power-on (wraps at ~45 days)
+ *    5   4  session      Unix time (UTC) when this session started (device boot, or a new
+ *                        horse scanned). Bit 31 set = random ID because the RTC had no time.
+ *    9   1  seq          increments every sample (gateway de-duplicates on session + seq)
+ *   10   1  flags        bit0 USB present, bit1 charging, bit2 charge full,
+ *                        bit3 charger fault, bit4 RTC time valid, bit5 RFID scan in progress
+ *   11   1  battery_soc  % (0..100), 0xFF = n/a
+ *   12   2  battery_mv   mV, 0 = n/a
+ *   14   2  temp         int16, 0.01 degC, 0x7FFF = n/a
+ *   16   1  humidity     0.5 %RH steps (0..200), 0xFF = n/a
+ *   17   4  steps        uint32 since power-on, 0xFFFFFFFF = n/a
+ *  (3 bytes spare in the 31-byte advert for heart rate / respiration)
  *
- * Future versions append fields (heart rate, respiration, ...) and bump `version`.
+ * SCAN RESPONSE - identity (15 bytes after the company ID) + complete local name "EQ-xxxxxx":
+ *    0   1  magic        0xE9
+ *    1   1  type         0x81 (identity record, v1)
+ *    2   3  device_id    BIG-endian
+ *    5   4  session      as above
+ *    9   6  horse_id     ISO 11784: country (10 bits) << 38 | national ID (38 bits), LE.
+ *                        0 = no tag scanned. Shown as 15 digits, e.g. 985141000123456.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -30,17 +38,21 @@
 
 #define TELEMETRY_COMPANY_ID   0xFFFF
 #define TELEMETRY_MAGIC        0xE9
-#define TELEMETRY_VERSION      1
-#define TELEMETRY_PAYLOAD_LEN  19
+#define TELEMETRY_VERSION      2
+#define TELEMETRY_PAYLOAD_LEN  21
+#define TELEMETRY_IDENTITY     0x81
+#define TELEMETRY_IDENTITY_LEN 15
 
 #define TELEM_FLAG_USB         (1u << 0)
 #define TELEM_FLAG_CHARGING    (1u << 1)
 #define TELEM_FLAG_FULL        (1u << 2)
 #define TELEM_FLAG_FAULT       (1u << 3)
 #define TELEM_FLAG_RTC_VALID   (1u << 4)
+#define TELEM_FLAG_RFID_SCAN   (1u << 5)
 
 typedef struct {
     uint32_t device_id;     /* 24 bits used */
+    uint32_t session;
     uint8_t  seq;
     uint8_t  flags;
     uint8_t  battery_soc;
@@ -48,7 +60,6 @@ typedef struct {
     int16_t  temp_c100;
     uint8_t  humidity_half;
     uint32_t steps;
-    uint16_t uptime_min;
 } telemetry_t;
 
 void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN]);
@@ -58,6 +69,9 @@ esp_err_t telemetry_ble_init(const char *name);
 
 /* Advertise `payload` for `duration_ms` at a 100 ms interval, replacing any burst in progress. */
 esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int duration_ms);
+
+/* Set the identity scan response (call at start-up and whenever the session / horse changes). */
+esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint64_t horse_id);
 
 /* Stop advertising (shutdown). */
 void telemetry_ble_stop(void);
