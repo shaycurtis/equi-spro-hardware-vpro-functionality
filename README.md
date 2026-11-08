@@ -142,6 +142,22 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 - Fixes since: WS2812 frame shift after light-sleep wake (D1 stuck green until the next blink),
   and auto-stop on USB plug-in. Built, not yet flashed/verified at the time of writing.
 
+## Battery drain investigation (parked 2026-11-08, waiting for the PPK2)
+
+- **Profiling (`CONFIG_PM_PROFILING=y`, dumps every 60 s from the sample loop; off by default):** chip in
+  light sleep **97.5 %** of the time, ~18 wake-ups/s, no rejected sleeps. Awake time (≈1.05 s/min at
+  160 MHz + 0.45 s/min Bluetooth) is worth only ~1-1.5 mA, so of the overnight ~12-14 mA, **~11 mA is a
+  constant board load present during sleep**.
+- Suspects: (1) **the microSD card** (fitted; powered whenever the device is on, never initialised, its
+  SPI pins float in light sleep); (2) the LC29H GNSS (always powered; how deep is `$PAIR650` backup?);
+  (3) the two WS2812s (~1-2 mA, no power switch: board change needed); (4) ESP32 floor with the main
+  XTAL on for BLE (~1 mA).
+- **Test to run:** PPK2 in **source-meter mode at 3.8 V on the battery connector, battery removed, SPRO
+  USB unplugged** (the BQ25303J has no power path, so USB would backfeed the PPK2). Read the 30 s average
+  and the between-burst floor, then pull the SD card and repeat; optionally the off-state leakage.
+- Firmware follow-ups once the culprit is known: SD card idle command at boot + defined pin levels in
+  sleep; interrupt-driven heart rate (MAX30001 INTB on GPIO7) and button wake instead of polling.
+
 ## Next steps
 
 1. **Phase 2e, power:** find the extra ~8 mA (PM profiling, WS2812 standby, XTAL); then shorten

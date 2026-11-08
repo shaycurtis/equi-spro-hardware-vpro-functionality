@@ -273,6 +273,11 @@ static void sample_task(void *arg)
             ESP_LOGW(TAG, "advert seq %u failed: %s", seq, esp_err_to_name(err));
         }
         seq++;
+#ifdef CONFIG_PM_PROFILING
+        if (seq % 2 == 0) {
+            esp_pm_dump_locks(stdout);   /* power profiling: time per mode and per lock (cumulative) */
+        }
+#endif
 
         /* After the burst: green heartbeat if a gateway answered, blue if not. */
         uint32_t reqs0 = telemetry_scan_requests();
