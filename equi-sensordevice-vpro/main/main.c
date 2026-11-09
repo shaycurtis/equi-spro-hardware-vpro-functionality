@@ -25,6 +25,7 @@
 #include "gnss.h"
 #include "board.h"
 #include "power.h"
+#include "provisioning.h"
 #include "rfid.h"
 #include "sensors.h"
 #include "status_led.h"
@@ -205,21 +206,49 @@ static void start_rfid_scan(void)
 }
 
 /* SW1: active low with a 10k pull-up. A short press starts a new tag scan. */
+#define REPROV_HOLD_MS  3000   /* both buttons held this long: back to Wi-Fi provisioning */
+
+/* SW1 short press (released within 2 s, power button not touched): rescan the tag.
+ * SW1 + power button held together for 3 s: Wi-Fi provisioning mode (add a network). */
 static void scan_button_task(void *arg)
 {
     gpio_config_t io = { .pin_bit_mask = BIT64(BOARD_PIN_SCAN_BTN), .mode = GPIO_MODE_INPUT };
     gpio_config(&io);
-    int low_ms = 0;
+    int low_ms = 0, both_ms = 0;
+    bool combo = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100));      /* slow poll: the low-level wake-up covers sleep */
-        if (gpio_get_level(BOARD_PIN_SCAN_BTN) == 0) {
-            if ((low_ms += 100) == 200) {    /* debounced press */
-                ESP_LOGI(TAG, "scan button pressed");
-                start_rfid_scan();
-            }
-        } else {
-            low_ms = 0;
+        if (power_shutting_down()) {
+            vTaskDelay(portMAX_DELAY);           /* powering off: no more gestures */
         }
+        bool scan = gpio_get_level(BOARD_PIN_SCAN_BTN) == 0;
+        bool pwr = gpio_get_level(BOARD_PIN_PWR_BTN) == 1;
+        power_set_combo(scan && pwr);
+        if (scan) {
+            low_ms += 100;
+            if (pwr) {
+                combo = true;
+                if ((both_ms += 100) == 500) {
+                    status_led_set(LED_WHITE);   /* "keep holding both" */
+                }
+                if (both_ms >= REPROV_HOLD_MS) {
+                    prov_request_and_restart();
+                }
+            } else if (both_ms) {
+                both_ms = 0;
+                status_led_override_clear();
+            }
+            continue;
+        }
+        if (both_ms) {
+            status_led_override_clear();
+        }
+        if (!combo && low_ms >= 200 && low_ms <= 2000) {
+            ESP_LOGI(TAG, "scan button pressed");
+            start_rfid_scan();
+        }
+        low_ms = both_ms = 0;
+        combo = false;
     }
 }
 
@@ -319,6 +348,9 @@ void app_main(void)
 
     s_dev_id = strtoul(device_id_get(), NULL, 16) & 0xFFFFFF;
     gnss_standby_async();
+    if (prov_required() || power_boot_prov_gesture()) {
+        prov_run(s_dev_id);                /* locked until Wi-Fi is set up; restarts when done */
+    }
     ESP_ERROR_CHECK(sensors_init());
     power_register_shutdown_cb(sensors_shutdown);
 

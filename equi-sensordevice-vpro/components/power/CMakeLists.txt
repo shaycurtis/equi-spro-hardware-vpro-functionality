@@ -1,3 +1,3 @@
 idf_component_register(SRCS "power.c"
                        INCLUDE_DIRS "include"
-                       PRIV_REQUIRES board status_led esp_driver_gpio esp_timer)
+                       PRIV_REQUIRES board status_led esp_driver_gpio esp_timer esp_pm)

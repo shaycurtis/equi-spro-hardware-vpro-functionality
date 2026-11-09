@@ -1,0 +1,4 @@
+dependencies:
+  # Wi-Fi provisioning (SoftAP, works with Espressif's "ESP SoftAP Provisioning" app). Moved out of
+  # ESP-IDF in v6.0. Official component, used unmodified (SoftAP scheme).
+  espressif/network_provisioning: "^1.0.0"

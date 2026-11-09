@@ -94,6 +94,10 @@ void telemetry_ble_stop(void);
  * itself is plain legacy ADV_IND, so passive gateways still get all the data. */
 bool telemetry_gateway_seen(uint32_t max_age_ms);
 
+/* Per-device setup code (8 hex digits) derived from the fleet key: Wi-Fi provisioning proof of
+ * possession and setup-network password. tools/setup_code.py computes the same value. */
+void telemetry_device_setup_code(uint32_t device_id, char out[9]);
+
 /* esp_timer time (us) of the last trusted-gateway scan request, -1 = never. */
 int64_t telemetry_gateway_last_seen_us(void);
 

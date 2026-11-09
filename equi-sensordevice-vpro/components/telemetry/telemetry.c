@@ -1,5 +1,6 @@
 #include "telemetry.h"
 
+#include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -424,6 +425,24 @@ void telemetry_ble_stop(void)
     if (s_synced && ble_gap_ext_adv_active(ADV_INSTANCE)) {
         ble_gap_ext_adv_stop(ADV_INSTANCE);
     }
+}
+
+void telemetry_device_setup_code(uint32_t device_id, char out[9])
+{
+    /* SHA-256(fleet key | "EQ-POP" | device id, big-endian 3 bytes), first 4 bytes as hex. */
+    uint8_t msg[16 + 6 + 3];
+    memcpy(msg, fleet_key_start, 16);
+    memcpy(&msg[16], "EQ-POP", 6);
+    msg[22] = (device_id >> 16) & 0xff;
+    msg[23] = (device_id >> 8) & 0xff;
+    msg[24] = device_id & 0xff;
+    uint8_t h[32];
+    size_t hl = 0;
+    psa_crypto_init();
+    if (psa_hash_compute(PSA_ALG_SHA_256, msg, sizeof(msg), h, sizeof(h), &hl) != PSA_SUCCESS) {
+        memset(h, 0, sizeof(h));
+    }
+    snprintf(out, 9, "%02x%02x%02x%02x", h[0], h[1], h[2], h[3]);
 }
 
 int64_t telemetry_gateway_last_seen_us(void)

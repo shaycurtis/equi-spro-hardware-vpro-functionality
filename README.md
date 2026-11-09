@@ -24,8 +24,9 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Area | State |
 |---|---|
 | Toolchain, secure boot, flash encryption | ✅ IDF 6.1, signed with the **spro** key, app-only encrypted flashing |
-| Power sequencing | ✅ Hold to power on (~1.5 s), long press to power off (2 s), charge-only deep sleep on USB |
-| LEDs | ✅ D1 short blue blink every 5 s while on; D2 shows charge state (red/green/orange); both blink green while waiting for an RFID tag |
+| Power sequencing | ✅ Hold to power on (~1.5 s), long press to power off (2 s), charge-only on USB (light sleep, no reboots) |
+| LEDs | ✅ D1 short blue blink every 5 s while on; D2 shows charge state (red/green/orange), both LEDs when off on USB; both blink green while waiting for an RFID tag |
+| Wi-Fi provisioning | ✅ Espressif `network_provisioning` (SoftAP, security 1), **ESP SoftAP Provisioning** app; per-device setup code; up to 5 saved networks in NVS |
 | Sensors (30 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer), RTC (PCF85063A) |
 | GPS | ✅ Parked in backup mode at boot (`$PAIR650,0`, verified) |
 | BLE telemetry | ✅ Advert v5 every 30 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
@@ -40,11 +41,33 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 
 ## Device behaviour (user view)
 
+0. **Locked (no Wi-Fi saved):** power on and **both LEDs are steady white**: provisioning mode (below).
 1. **Power on:** hold the power button ~1.5 s. Green double flash, then **both LEDs blink green**: scan the horse's tag.
 2. **Tag read** (or 2 min timeout): D1 **steady blue** until a trusted gateway has received the session (encrypted identity), then a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
 3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
 4. **Plugging in USB** while running on battery ends the session automatically (after 2 s): orange flashes, then charge-only (D2 red/green). Booting while already on USB keeps running (bench use).
-5. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (D2 red = charging, green = full).
+5. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (**both LEDs** red = charging, green = full, orange = fault).
+6. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white.
+
+### Wi-Fi provisioning
+
+Official Espressif flow, nothing custom: the `espressif/network_provisioning` component (SoftAP scheme,
+security 1) with Espressif's **ESP SoftAP Provisioning** app (iOS / Android).
+
+- The device opens a 2.4 GHz access point **`PROV_<device id>`** (e.g. `PROV_15B0B4`). Its WPA2 password
+  and the app's proof of possession are the same per-device **setup code**: the first 8 hex digits of
+  SHA-256(fleet key | "EQ-POP" | device id). `python tools/setup_code.py 15B0B4` prints it and the
+  app's QR payload (needs `private/fleet_key.bin`).
+- In the app: Provision Device → "I don't have a QR code" → join `PROV_…` → enter the code → pick the
+  network. Both LEDs **flash white** while the device connects; a wrong password / missing network goes
+  back to steady white for the app to retry.
+- Success: the network is saved (NVS `vpro`/`wifi_nets`, up to 5, newest first) and the device **powers
+  off** with the LEDs dark (on USB, charge-only then shows the charge colour). The next power-on is a
+  normal session.
+- Exit without finishing: hold the power button 2 s. A device that already has a network then starts
+  normally next time; one with none stays locked. Provisioning mode times out after 10 min (power off).
+- The saved networks are for the Wi-Fi-while-charging work (time, backend check-in, OTA, uploads):
+  not used yet.
 
 ## Build and flash (device firmware)
 
@@ -107,6 +130,11 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
   XTAL (APB scales with DFS); an enabled RMT channel blocks sleep; FreeRTOS ticks lag in light
   sleep, so use `esp_timer` for real-time deadlines and pulse timing. The WS2812 data line can
   glitch across a sleep/wake, so every frame is preceded by a full reset period.
+- **No deep sleep in charge-only:** every deep-sleep wake is a reboot and the LEDs visibly blinked
+  each time (holding the data pad low and skipping identical frames did not help). Charge-only now
+  idles in automatic light sleep (~1-2 mA from USB) and restarts on a button press.
+- **Buttons:** the power component configures the scan-button pad itself; an unconfigured pad reads 0
+  ("pressed"), which once made every power-off in provisioning mode look like the both-buttons gesture.
 - **RTC oscillator-stop flag** was seen once after the RFID reader switched on (coin cell is fitted).
   Firmware tolerates it (plausible date still used) and the gateway re-syncs time. Measure the coin cell
   if it recurs.

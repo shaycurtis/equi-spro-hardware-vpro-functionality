@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "board.h"
 #include "status_led.h"
+#include "esp_pm.h"
 
 static const char *TAG = "power";
 
@@ -124,38 +125,63 @@ static void rails_off(void)
 
 /* ------------------------------------------------------ off / charge-only */
 
+static void sleep_pins_setup(void);
+static bool s_booting;   /* inside power_boot(): no app tasks running yet */
+static bool s_prov_gesture;
+
+bool power_boot_prov_gesture(void) { return s_prov_gesture; }
+
+static void show_charge(power_charge_t c)
+{
+    led_colour_t col = charge_colour(c);
+    status_led_set(col);                                   /* one frame: both LEDs together */
+    status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, col);
+    status_led_set_mode(LED_IDX_STATUS, LED_MODE_SOLID, col);
+    status_led_override_clear();                           /* same colours: no new frame */
+}
+
+/*
+ * Device "off" on USB: both LEDs show the charge state. The chip stays up in automatic light
+ * sleep (RAM and pins kept, ~1-2 mA from USB) instead of deep-sleep polling: every deep-sleep
+ * wake is a reboot, and the LEDs visibly blinked on each one.
+ */
 static void __attribute__((noreturn)) charge_only_sleep(void)
 {
-    /* Sample STAT for ~1.2 s so a 1 Hz fault blink is recognised. */
+    if (!s_booting) {
+        /* Called from a running session (power-off on USB): restart so no app task, radio or
+         * sensor is left running, and come back here from power_boot(). */
+        ESP_LOGI(TAG, "Restarting into charge-only");
+        fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        esp_restart();
+    }
+
+    sleep_pins_setup();   /* keep the LED / latch pins driven and let the buttons wake us */
+    esp_pm_config_t pm = { .max_freq_mhz = 80, .min_freq_mhz = 40, .light_sleep_enable = true };
+    esp_err_t err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "light sleep unavailable: %s", esp_err_to_name(err));
+    }
+
+    wait_btn_release();   /* the press that turned the device off is not a power-on */
     chg_trk_t trk = { .last = -1 };
-    power_charge_t c = POWER_CHARGE_NO_USB;
-    for (int i = 0; i < 12; i++) {
-        c = chg_update(&trk, now_ms());
+    power_charge_t shown = (power_charge_t)-1;
+    for (;;) {
+        power_charge_t c = chg_update(&trk, now_ms());
+        if (c != shown) {
+            ESP_LOGI(TAG, "Charge-only: %s", charge_name(c));
+            show_charge(c);
+            shown = c;
+        }
+        if (btn_raw()) {
+            /* Power-on request: the boot code applies the usual hold-to-start rule. */
+            ESP_LOGI(TAG, "Button pressed: restarting");
+            fflush(stdout);
+            esp_restart();
+        }
+        /* USB removed: nothing to do, the 3.3 V rail drops with it (latch is off). */
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    /*
-     * Device is "off": D1 dark, D2 shows the charge state (latched through deep sleep).
-     * Order matters: after a deep-sleep wake both modes start OFF while the LEDs still
-     * show the latched colour, so set D2 first - the first frame written is then the
-     * final one and the LED never flickers on each 10 s wake.
-     */
-    status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, charge_colour(c));
-    status_led_set_mode(LED_IDX_STATUS, LED_MODE_OFF, LED_OFF);
-    status_led_override_clear();
-    ESP_LOGI(TAG, "Charge-only: %s, sleeping %d s (button wakes)", charge_name(c), POWER_CHARGE_POLL_S);
-
-    wait_btn_release(); /* otherwise ext0 would wake us immediately */
-
-    /* GPIO4 is an RTC IO: wake when the power button drives it high. */
-    rtc_gpio_pullup_dis(BOARD_PIN_PWR_BTN);
-    rtc_gpio_pulldown_en(BOARD_PIN_PWR_BTN);
-    esp_sleep_enable_ext0_wakeup(BOARD_PIN_PWR_BTN, 1);
-    esp_sleep_enable_timer_wakeup((uint64_t)POWER_CHARGE_POLL_S * 1000000ULL);
-
-    /* PMIC_EN floats in deep sleep; D4 + R23 (100k) keep the switch enable low. */
-    fflush(stdout);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    esp_deep_sleep_start();
 }
 
 static void __attribute__((noreturn)) power_off_now(void)
@@ -215,6 +241,11 @@ void power_early_init(void)
     };
     gpio_config(&btn);
 
+    /* Scan button (10k external pull-up): configured here, not by the app, because the
+     * both-buttons check below runs in every mode (an unconfigured pad reads 0 = "pressed"). */
+    gpio_config_t scan = { .pin_bit_mask = BIT64(BOARD_PIN_SCAN_BTN), .mode = GPIO_MODE_INPUT };
+    gpio_config(&scan);
+
     /* PWR_GD (divider) and CHG_IND (100k pull-up) have external pulls. */
     gpio_config_t in = {
         .pin_bit_mask = BIT64(BOARD_PIN_PWR_GD) | BIT64(BOARD_PIN_CHG_IND),
@@ -225,6 +256,7 @@ void power_early_init(void)
 
 void power_boot(void)
 {
+    s_booting = true;
     uint32_t causes = esp_sleep_get_wakeup_causes();
     bool usb = power_usb_present();
     bool btn = btn_raw();
@@ -234,6 +266,7 @@ void power_boot(void)
     if (s_resume) {
         ESP_LOGW(TAG, "Recovered from reset while running; staying on");
         latch_on();
+        s_booting = false;
         return;
     }
 
@@ -253,7 +286,25 @@ void power_boot(void)
         if (released_at < 0 || now_ms() - released_at < DEBOUNCE_MS) {
             latch_on();
             ESP_LOGI(TAG, "Power latched on at %lld ms", now_ms());
+            /* Both buttons held through power-on: the provisioning gesture. Keep white while
+             * they stay held; at POWER_PROV_HOLD_MS go straight to provisioning. */
+            bool both = false;
+            while (btn_raw() && gpio_get_level(BOARD_PIN_SCAN_BTN) == 0) {
+                if (now_ms() >= POWER_PROV_HOLD_MS) {
+                    both = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (both) {
+                ESP_LOGI(TAG, "Both buttons held at power-on: provisioning");
+                s_prov_gesture = true;
+                status_led_flash(LED_WHITE, 3, 150, 150);
+                s_booting = false;
+                return;
+            }
             status_led_flash(LED_GREEN, 2, 150, 100);
+            s_booting = false;
             return;
         }
         ESP_LOGI(TAG, "Button released before %d ms, not powering on", POWER_HOLD_ON_MS);
@@ -273,10 +324,17 @@ void power_register_shutdown_cb(power_shutdown_cb_t cb)
     }
 }
 
-void power_shutdown(void)
+static volatile bool s_combo;          /* both buttons held (reported by the app's button task) */
+static volatile bool s_shutting_down;
+
+void power_set_combo(bool held) { s_combo = held; }
+bool power_shutting_down(void) { return s_shutting_down; }
+
+static void __attribute__((noreturn)) shutdown(bool flash)
 {
+    s_shutting_down = true;
     ESP_LOGI(TAG, "Shutting down...");
-    status_led_set(LED_ORANGE);
+    status_led_set(flash ? LED_ORANGE : LED_OFF);
     for (int i = s_ncbs - 1; i >= 0; i--) {
         s_cbs[i]();
     }
@@ -284,9 +342,14 @@ void power_shutdown(void)
     /* Stop the "on" breathe / any app pattern; charge-only mode re-applies D2 if on USB. */
     status_led_set_mode(LED_IDX_STATUS, LED_MODE_OFF, LED_OFF);
     status_led_set_mode(LED_IDX_CHARGE, LED_MODE_OFF, LED_OFF);
-    status_led_flash(LED_ORANGE, 3, 100, 100);
+    if (flash) {
+        status_led_flash(LED_ORANGE, 3, 100, 100);
+    }
     power_off_now();
 }
+
+void power_shutdown(void) { shutdown(true); }
+void power_shutdown_silent(void) { shutdown(false); }
 
 /* -------------------------------------------------------------- run task */
 
@@ -338,7 +401,12 @@ static void power_task(void *arg)
             int64_t t0 = now_ms();
             int64_t released_at = -1;
             bool shown = false;
+            bool combo = false;
             while (now_ms() - t0 < POWER_HOLD_OFF_MS) {
+                if (s_combo || gpio_get_level(BOARD_PIN_SCAN_BTN) == 0) {
+                    combo = true;   /* both buttons: the app's gesture (re-provision), not power-off */
+                    break;
+                }
                 if (btn_raw()) {
                     released_at = -1;
                 } else if (released_at < 0) {
@@ -352,7 +420,15 @@ static void power_task(void *arg)
                 }
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
+            if (combo) {
+                ESP_LOGI(TAG, "Both buttons held: power-off suppressed");
+                while (btn_raw()) {
+                    vTaskDelay(pdMS_TO_TICKS(50));   /* wait for release; main handles the gesture */
+                }
+                continue;
+            }
             if (now_ms() - t0 >= POWER_HOLD_OFF_MS) {
+                ESP_LOGI(TAG, "Power button held %d ms: powering off", POWER_HOLD_OFF_MS);
                 power_shutdown();
             }
             ESP_LOGI(TAG, "Short press (%lld ms), ignored", now_ms() - t0);
