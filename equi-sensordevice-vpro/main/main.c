@@ -192,10 +192,16 @@ static void start_session(uint64_t packed, const char *horse)
     ESP_LOGI(TAG, "session %lu started, HorseID %s%s", (unsigned long)s_session, horse ? horse : "unknown",
              (s_session & 0x80000000u) ? " (random ID: RTC not set)" : "");
     publish_identity();
-    if (storage_mounted() && storage_config()->ecg_log) {
+    const storage_config_t *cfg = storage_config();
+    if (storage_mounted() && (cfg->ecg_log || cfg->imu_log)) {
         if (first) {
-            if (recorder_start(s_dev_id, s_session, epoch, storage_config()->ecg_rate_hz, horse) != ESP_OK) {
-                ESP_LOGW(TAG, "ECG recording not started");
+            recorder_cfg_t rc = {
+                .device_id = s_dev_id, .session = s_session, .epoch = epoch, .horse = horse,
+                .ecg_rate_hz = cfg->ecg_log ? cfg->ecg_rate_hz : 0,
+                .imu_rate_hz = cfg->imu_log ? cfg->imu_rate_hz : 0,
+            };
+            if (recorder_start(&rc) != ESP_OK) {
+                ESP_LOGW(TAG, "SD recording not started");
             }
         } else {
             recorder_new_session(s_session, epoch, horse);

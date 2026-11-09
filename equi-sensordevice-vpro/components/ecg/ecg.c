@@ -235,12 +235,6 @@ static void intb_setup(bool on)
         };
         gpio_config(&io);
         gpio_sleep_sel_dis(BOARD_PIN_ECG_INT);  /* stay an input through light sleep */
-        esp_err_t err = gpio_install_isr_service(0);
-        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "GPIO ISR service: %s; polling only", esp_err_to_name(err));
-            s_irq_ok = false;
-            return;
-        }
         if (!s_isr_added && gpio_isr_handler_add(BOARD_PIN_ECG_INT, intb_isr, NULL) == ESP_OK) {
             s_isr_added = true;
         }

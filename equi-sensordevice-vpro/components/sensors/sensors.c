@@ -91,6 +91,23 @@ esp_err_t sensors_set_time(uint32_t epoch_utc)
     return err;
 }
 
+esp_err_t sensors_imu_stream_start(uint16_t rate_hz, imu_stream_cb_t cb, void *ctx, float *actual_hz)
+{
+    return s_imu ? lsm6dsox_stream_start(rate_hz, cb, ctx, actual_hz) : ESP_ERR_NOT_FOUND;
+}
+
+void sensors_imu_stream_stop(void)
+{
+    if (s_imu) {
+        lsm6dsox_stream_stop();
+    }
+}
+
+bool sensors_mag_ok(void)
+{
+    return s_imu && lsm6dsox_mag_ok();
+}
+
 void sensors_shutdown(void)
 {
     if (s_imu) {

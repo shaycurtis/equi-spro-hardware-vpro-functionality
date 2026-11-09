@@ -479,6 +479,7 @@ void power_start(void)
         apply_charge_led();
     }
     sleep_pins_setup();
+    gpio_install_isr_service(0);   /* shared by the ECG and IMU interrupt handlers */
     /* The button is polled every TASK_PERIOD_MS (the level wake-up gets the chip out of light
      * sleep while it is held), so no edge interrupt is needed. */
     xTaskCreate(power_task, "power", 3072, NULL, 10, &s_task);

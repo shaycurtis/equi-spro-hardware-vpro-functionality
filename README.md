@@ -37,7 +37,8 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
 | SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 512/256 Hz per `config.json`, interrupt-driven (light sleep kept), 0 overflows |
-| IMU logging, Wi-Fi upload | ⏳ Next (IMU: accel + gyro 104/416 Hz, mag 104 Hz, separate `imu_…edf`) |
+| SD card IMU logging | ✅ `imu_…edf`: accel ±16 g + gyro ±2000 dps at 104/416 Hz, LIS2MDL mag at 104 Hz (sensor hub), FIFO + INT1, 0 overruns |
+| Wi-Fi upload | ⏳ Not started |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
 
 ## Device behaviour (user view)
@@ -64,6 +65,13 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 - The MAX30001 interrupt (INTB, open drain to 1.8 V) wakes the chip every 16 samples; light sleep
   continues in between. Measured: exactly 512.0 sps, 32 reads/s, 0 overflows. BLE ECG requests tap
   the same stream (512 Hz only).
+- IMU EDF: AccX/Y/Z (g, 0.488 mg/LSB), GyrX/Y/Z (dps, 70 mdps/LSB) at the IMU rate, MagX/Y/Z (uT,
+  0.15 uT/LSB) at 104 Hz, raw sensor axes. The record duration is the IMU's real one from its
+  oscillator trim (e.g. 0.99552 s at "416 Hz" = 417.87 Hz), so it stays aligned with the ECG's
+  crystal timeline. Both files start at the session start (each stream is padded back to it).
+- The magnetometer includes the board's hard-iron offset (~(-124, -13, 19) uT on this unit, from the
+  buzzer / motor / battery); calibrate it out in analysis (rotate through all orientations, subtract
+  the centre). Measured: 25137 accel + gyro and 6285 mag samples per minute, 0 overruns.
 - Check a file: `python tools/edf_info.py F:/sessions/<session>/ecg_…edf` (or open in EDFbrowser).
 - Card: Transcend industrial 32 GB, 815 KB/s write over SPI3 at 20 MHz (ECG needs ~1 KB/s).
 
@@ -151,6 +159,12 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 - **No deep sleep in charge-only:** every deep-sleep wake is a reboot and the LEDs visibly blinked
   each time (holding the data pad low and skipping identical frames did not help). Charge-only now
   idles in automatic light sleep (~1-2 mA from USB) and restarts on a button press.
+- **LSM6DSOX sensor hub (LIS2MDL):** only switch the hub's I2C master on/off with the accelerometer
+  powered down (ST AN5272); otherwise the hub freezes (STATUS_MASTER stays 0) and stays frozen across
+  an ESP reset, because the IMU stays powered on USB. Even done right, the first continuous start
+  after configuring the LIS2MDL does not run, so the start is verified and retried. Init stops the
+  hub before the software reset (a reset alone does not). A recorder signal that stops delivering
+  is padded after 10 records instead of holding the whole file.
 - **Buttons:** the power component configures the scan-button pad itself; an unconfigured pad reads 0
   ("pressed"), which once made every power-off in provisioning mode look like the both-buttons gesture.
 - **RTC oscillator-stop flag** was seen once after the RFID reader switched on (coin cell is fitted).
