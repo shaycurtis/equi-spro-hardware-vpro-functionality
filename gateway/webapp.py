@@ -30,7 +30,7 @@ from equi_protocol import session_is_random
 HERE = Path(__file__).parent
 STATIC = HERE / "static"
 DEFAULT_DB = HERE / "data" / "telemetry.db"
-SAMPLE_PERIOD_S = 30
+SAMPLE_PERIOD_S = 60
 MAX_POINTS = 720          # above this, average into time buckets
 MAX_GAP = 120             # within one gateway run + device boot, gaps up to 1 h are radio losses
 BATTERY_MAH = 1500.0      # overridden by serve(battery_mah=...)

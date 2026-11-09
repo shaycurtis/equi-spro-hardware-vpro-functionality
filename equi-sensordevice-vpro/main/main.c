@@ -2,7 +2,7 @@
  * Equimetrics sensor device - VPro firmware for the SPRO PCBA.
  *
  * Phase 1: power sequencing (power.h).
- * Phase 2a: slow sensors sampled every 30 s (sensors.h), GNSS parked in backup mode.
+ * Phase 2a: slow sensors sampled every 60 s (sensors.h), GNSS parked in backup mode.
  * Phase 2b: each sample is broadcast as a BLE advert burst (telemetry.h).
  * Phase 2d: on-demand ECG over BLE (ecg.h, telemetry/ecg_service.h).
  * Sessions: at boot the RFID reader waits for the horse's tag (both LEDs flash green). The
@@ -38,7 +38,7 @@
 #include "cloud.h"
 #include "esp_app_desc.h"
 
-#define SAMPLE_PERIOD_S  30
+#define SAMPLE_PERIOD_S  60     /* matches the VPro LoRa device: one reading a minute */
 #define ADV_BURST_MS     2000   /* 20 adverts at 100 ms; tune down once gateway reception is known */
 #define RFID_TIMEOUT_S   120    /* how long to wait for a tag (no session starts without one or the override) */
 

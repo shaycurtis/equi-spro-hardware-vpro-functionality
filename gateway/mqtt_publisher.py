@@ -5,7 +5,7 @@ format of the postBleData Lambda (cloud/post_ble_data/post_ble_data.py):
     topic   equimetrics/ble/<gatewayId>/adv
     payload {"gatewayId": ..., "items": [{"mac", "rssi", "ts", "adv" | "rsp": "<hex AD structures>"}]}
 
-One message per device per 30 s burst: every copy of the telemetry advert heard in the burst
+One message per device per 60 s burst: every copy of the telemetry advert heard in the burst
 (the Lambda keeps the best RSSI) plus the device's latest identity scan response, so the Lambda
 can always attach the session and horse. Sent BURST_SETTLE_S after the burst's first advert.
 

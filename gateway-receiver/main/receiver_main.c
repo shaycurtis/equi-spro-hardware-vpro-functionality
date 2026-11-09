@@ -34,7 +34,7 @@
 
 #define COMPANY_ID       0xFFFF
 #define MAGIC            0xE9
-#define WAIT_ADV_S       45      /* devices advertise every 30 s */
+#define WAIT_ADV_S       75      /* devices advertise every 60 s */
 #define ECG_PKT_END      0xEF
 #define CMD_START        0x01
 #define CMD_SET_TIME     0x10

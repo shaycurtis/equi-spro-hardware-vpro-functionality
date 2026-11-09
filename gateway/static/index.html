@@ -98,7 +98,7 @@
     <div class="charts">
       <div class="chart"><h3>Battery</h3><div class="box"><canvas id="chBatt"></canvas></div></div>
       <div class="chart"><h3>Temperature &amp; humidity</h3><div class="box"><canvas id="chEnv"></canvas></div></div>
-      <div class="chart"><h3>Heart rate (bpm, median over each 30 s)</h3><div class="box"><canvas id="chHr"></canvas></div></div>
+      <div class="chart"><h3>Heart rate (bpm, median over each 60 s)</h3><div class="box"><canvas id="chHr"></canvas></div></div>
       <div class="chart"><h3>Activity (steps per interval)</h3><div class="box"><canvas id="chSteps"></canvas></div></div>
       <div class="chart"><h3>Reception (best RSSI and adverts heard per burst)</h3><div class="box"><canvas id="chRx"></canvas></div></div>
       <div class="chart ecgcard">
@@ -110,7 +110,7 @@
             <button class="btn primary" id="ecgBtn">Capture ECG</button>
           </div>
         </div>
-        <div id="ecgStatus" class="muted">The device is contacted on its next advert (within 30 s), then streams the capture.</div>
+        <div id="ecgStatus" class="muted">The device is contacted on its next advert (within 60 s), then streams the capture.</div>
         <div class="box"><canvas id="chEcg"></canvas></div>
         <div class="ecglist" id="ecgList"></div>
       </div>
@@ -368,7 +368,7 @@ async function loadEcgList() {
       ecgShown = null;
       document.getElementById("ecgStatus").textContent = cur && !cur.live
         ? "ECG captures taken during this session appear here."
-        : "The device is contacted on its next advert (within 30 s), then streams the capture.";
+        : "The device is contacted on its next advert (within 60 s), then streams the capture.";
     }
     return;
   }

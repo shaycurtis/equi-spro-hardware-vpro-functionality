@@ -7,7 +7,7 @@
  * with company ID 0xFFFF (Bluetooth SIG "test / not assigned" - replace with an Equimetrics
  * company ID for production).
  *
- * ADVERT - live data, every 30 s (20 bytes after the company ID, little-endian unless noted):
+ * ADVERT - live data, every 60 s (20 bytes after the company ID, little-endian unless noted):
  *   off len field
  *    0   1  magic        0xE9
  *    1   1  version      0x05
@@ -23,7 +23,7 @@
  *   12   2  temp         int16, 0.01 degC, 0x7FFF = n/a
  *   14   1  humidity     0.5 %RH steps (0..200), 0xFF = n/a
  *   15   4  steps        uint32 since power-on, 0xFFFFFFFF = n/a
- *   19   1  heart_rate   bpm over the last 30 s (MAX30001 R-to-R, median), 0 = no beats
+ *   19   1  heart_rate   bpm over the last 60 s (MAX30001 R-to-R, median), 0 = no beats
  *  (4 bytes spare in the 31-byte advert)
  *  v4 = 4-byte session ID at offset 5 and everything after shifted by 3. v3 = v4 without
  *  heart_rate. v2 = v3 with battery_soc as 1 byte of whole %.

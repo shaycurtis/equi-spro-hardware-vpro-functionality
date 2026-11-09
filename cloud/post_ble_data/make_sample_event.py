@@ -1,5 +1,5 @@
 """
-Write sample_event.json: one 30 s telemetry burst from a device, as a gateway would forward it
+Write sample_event.json: one 60 s telemetry burst from a device, as a gateway would forward it
 (three copies of the advert + the encrypted identity scan response), for the Lambda console's
 Test tab. The identity is encrypted with the real fleet key from <repo>/private/fleet_key.bin;
 the output only holds the over-the-air bytes, never the key.

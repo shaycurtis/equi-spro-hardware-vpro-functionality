@@ -103,6 +103,16 @@ class PostBleDataTest(unittest.TestCase):
         self.assertEqual(d["steps"], 1234)
         self.assertEqual(d["status"], "Disconnected")
         self.assertIs(d["wifiConnected"], False)
+        # temporary placeholders for the app's horse charts
+        self.assertEqual(d["horseTemperature"], Decimal("22.91"))
+        self.assertEqual(d["respiration"], 14)                 # round(41 / 3)
+        self.assertEqual((d["position"], d["positionsSeen"]), ("standing", []))
+
+    def test_no_heart_rate_is_zero_not_null(self):
+        from types import SimpleNamespace
+        for hr in (None, 0):
+            m = lam.placeholder_horse_metrics(SimpleNamespace(heart_rate=hr, temp_c=21.5))
+            self.assertEqual((m["heartRate"], m["respiration"]), (0, 0))
 
     def test_shape_matches_create_measurement_data(self):
         # Every key we send must be one the common layer forwards (it drops unknown keys).

@@ -307,8 +307,9 @@ async def main() -> None:
     ap.add_argument("--web", metavar="PORT", type=int, nargs="?", const=8080,
                     help="also serve the dashboard (default port 8080)")
     ap.add_argument("--battery-mah", type=float, default=1500, help="battery capacity for drain/runtime estimates")
-    ap.add_argument("--mqtt", metavar="ENDPOINT",
-                    help="also publish each burst to AWS IoT Core at this endpoint (IoT Core -> Settings)")
+    ap.add_argument("--mqtt", metavar="ENDPOINT", nargs="?", const="",
+                    help="also publish each burst to AWS IoT Core; the endpoint defaults to "
+                         "<repo>/private/iot/endpoint.txt (IoT Core -> Settings -> Device data endpoint)")
     ap.add_argument("--mqtt-dry-run", action="store_true",
                     help="build the MQTT messages but only write them to --mqtt-dump (no AWS)")
     ap.add_argument("--mqtt-thing", default="equi-pc-gateway-dev",
@@ -328,8 +329,13 @@ async def main() -> None:
         asyncio.get_running_loop().call_later(args.duration, lambda: stop.set())
 
     gw = Gateway(args.db, args.verbose)
-    if args.mqtt or args.mqtt_dry_run:
+    if args.mqtt is not None or args.mqtt_dry_run:
         from mqtt_publisher import DEFAULT_CERT_DIR, MqttPublisher
+        if args.mqtt == "" and not args.mqtt_dry_run:
+            ep = (args.mqtt_certs or DEFAULT_CERT_DIR) / "endpoint.txt"
+            if not ep.exists():
+                raise SystemExit(f"--mqtt without an endpoint needs {ep} (one line: the Device data endpoint)")
+            args.mqtt = ep.read_text().strip()
         dump = args.mqtt_dump or (Path(__file__).parent / "data" / "mqtt_out" if args.mqtt_dry_run else None)
         gw.publisher = MqttPublisher(args.mqtt_thing, args.mqtt, args.mqtt_certs or DEFAULT_CERT_DIR,
                                      dump_dir=dump, dry_run=args.mqtt_dry_run)

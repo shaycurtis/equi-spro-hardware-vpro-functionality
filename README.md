@@ -27,19 +27,21 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Power sequencing | ✅ Hold to power on (~1.5 s), long press to power off (2 s), charge-only on USB (light sleep, no reboots) |
 | LEDs | ✅ D1 short blue blink every 5 s while on; D2 shows charge state (red/green/orange), both LEDs when off on USB; both blink green while waiting for an RFID tag |
 | Wi-Fi provisioning | ✅ Espressif `network_provisioning` (SoftAP, security 1), **ESP SoftAP Provisioning** app; per-device setup code; up to 5 saved networks in NVS |
-| Sensors (30 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer), RTC (PCF85063A) |
+| Sensors (60 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer), RTC (PCF85063A) |
 | GPS | ✅ Parked in backup mode at boot (`$PAIR650,0`, verified) |
-| BLE telemetry | ✅ Advert v5 every 30 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
+| BLE telemetry | ✅ Advert v5 every 60 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
 | Sessions + RFID HorseID | ✅ Session (Unix time **in ms**, as VPro) starts at the tag scan, or scan-button override (chip "Unknown"); JY-LD6900, 9600 ASCII; per-session dashboard view |
 | Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate; with ECG 512 Hz + IMU 416 Hz logging **~28 mA** (≈2.2 days). Parked until the PPK2 is found (see below) |
-| Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
+| Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 60 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
 | SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 256 (default) / 512 Hz per `config.json`, mV (as VPro), interrupt-driven (light sleep kept), 0 overflows |
 | Live ECG + app recordings | ✅ VPro-compatible BLE services (Raw ECG 256 sps, Heart Rate, ECG control); works with the **Equimetrics (VPro) app**; app recordings saved as their own EDF files. App needs a backend-registered ID: this board is registered on dev as `15B0B4` |
 | SD card IMU logging | ✅ `imu_…edf`: accel ±16 g + gyro ±2000 dps at 104/416 Hz, LIS2MDL mag at 104 Hz (sensor hub), FIFO + INT1, 0 overruns |
-| Wi-Fi upload | ⏳ Not started; VPro's backend API mapped (see "VPro backend API" below) |
+| Live BLE data to the backend | ✅ PC gateway `--mqtt` -> AWS IoT Core (`equimetrics/ble/<thing>/adv`) -> **postBleData** Lambda -> dev API -> Mongo -> app charts, one measurement a minute (`cloud/README.md`). `horseTemperature`, `respiration` (heart rate / 3), `position` and `positionsSeen` are **temporary placeholders** in the Lambda; `heartRate` is 0 when no beats were counted |
+| Charging telemetry | ✅ On USB in charge-only mode: Wi-Fi + SNTP every 10 min, POST to the dev data API (in Mongo) |
+| Wi-Fi file upload | ⏳ Not started; VPro's backend API mapped (see "VPro backend API" below) |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
 
 ## Device behaviour (user view)
@@ -47,7 +49,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 0. **Locked (no Wi-Fi saved):** power on and **both LEDs are steady white**: provisioning mode (below).
 1. **Power on:** hold the power button ~1.5 s. Green double flash, then **both LEDs blink green**: scan the horse's tag.
 2. **Tag read** starts the session and its SD recording. No tag? Press the **scan button** during the wait to start it anyway (chip "unknown"). After a 2 min timeout with neither, no session starts (press the scan button to scan again). Then: D1 **steady blue** until a trusted gateway has received the session (encrypted identity), then a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
-3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
+3. **Running:** heart rate monitored continuously; every 60 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
 4. **Plugging in USB** while running on battery ends the session automatically (after 2 s): orange flashes, then charge-only (D2 red/green). Booting while already on USB keeps running (bench use).
 5. **Live ECG (Equimetrics app):** the app lists the device, pairs (passkey **111111**, asked once per
    phone) and shows the live ECG; recordings started in the app are saved to the SD card (below).
@@ -72,7 +74,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
   ECG on and a session running, the session file already has the ECG: the app gets the live view only.
 - ECG EDF: 1 s records, int16, 0.381 uV/LSB, **mV** (-12.5 .. 12.49962), header patient = the chip
   number (or `Unknown`), recording = `Device EQUI_<id> Session <session>`, start = session start
-  (UTC). Written every 30 s (app recordings every 5 s) with the record count updated and the file
+  (UTC). Written every 60 s (app recordings every 5 s) with the record count updated and the file
   synced, so a battery cut loses at most that much. A different horse switches to a new session file
   at the exact sample.
 - The MAX30001 interrupt (INTB, open drain to 1.8 V) wakes the chip every 16 samples; light sleep
@@ -102,7 +104,7 @@ existing **Equimetrics app** works unchanged. Details: `components/telemetry/liv
   asks for the passkey **111111** (`TELEMETRY_BLE_PASSKEY`; to be generated per device at
   provisioning once the backend is connected). Bonds are stored in NVS.
 - **Advertising:** a second, connectable advert every 1 s for the app (VPro's layout: flags + Heart
-  Rate + Raw ECG UUID, name in the scan response), next to the 30 s telemetry bursts. Name =
+  Rate + Raw ECG UUID, name in the scan response), next to the 60 s telemetry bursts. Name =
   `EQUI_` + the device ID (VPro: `BOARD_HOSTNAME_PREFIX` + its LoRa EUI-64), here `EQUI_15B0B4`. The
   BT address is the chip's BT MAC + `BLE_ADDR_OFFSET` (VPro adds 1 to get past iOS's name cache;
   bump it after any name change; now 4).
@@ -282,23 +284,23 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Next steps
 
-1. **Live BLE data to the backend:** `cloud/post_ble_data` (postBleData Lambda, tested offline),
-   then the PC gateway's `--mqtt` publisher and the IoT Core thing / rule (`cloud/README.md`).
+1. **Live data soak test:** leave a session running through the PC gateway and watch for gaps or
+   errors (gateway, postBleData logs in CloudWatch, Mongo). Reflash the **receiver dev kit** (its
+   on-demand ECG wait is now 75 s for the 60 s bursts). Then: DynamoDB dedup for several gateways,
+   a commercial gateway + adapter, postBleData memory 256 MB and its own role for production.
 2. **Wi-Fi while charging: file offload to the dev backend** with VPro's endpoints (below): prepare ->
-   PUT to the pre-signed URL -> process; then charging telemetry and the device event log; firmware
-   check + remote `setup` (config). Needs the dev URLs and API keys (kept out of git, like VPro's
-   `env.xh`); TLS with the certificate bundle (VPro has verification off).
+   PUT to the pre-signed URL -> process; then the device event log; firmware check + remote `setup`
+   (config). Charging telemetry already works with the dev data key (`private/api_env.h`).
 3. **BLE bond store:** `ble_store_config_write_local_irk rc=27` at boot (store capacity); pairing works
    but check bonds survive reboots.
 4. **Web Bluetooth config page:** edit `config.json` settings and view the saved networks from a
-   browser (Chrome on Android / desktop; Bluefy on iOS).
-2. **Web Bluetooth config page:** edit `config.json` settings and view the saved networks from a
    browser (Chrome on Android / desktop; Bluefy on iOS).
 5. **Power:** the parked PPK2 drain test (SD card is the top suspect for the extra ~8 mA), plus the
    cost of logging (ECG interrupt every 31 ms, IMU FIFO reads ~30/s at 416 Hz); then shorten the 2 s
    burst and tune TX power after the range test. The app advert (every 1 s) adds a little; measure it.
 6. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
-7. **Respiration** (MAX30001 BioZ or ECG-derived; the app's respiration service is waiting for it), and checking R-to-R detection on a horse ECG
+7. **Respiration** (MAX30001 BioZ or ECG-derived; the app's respiration service and the
+   backend's `respiration` field, now a placeholder, are waiting for it), posture for `position`, and checking R-to-R detection on a horse ECG
    (large T waves may need WNDW/PTSF tuning).
 8. Lead-off detection on the MAX30001 (status byte of the live ECG).
 9. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.

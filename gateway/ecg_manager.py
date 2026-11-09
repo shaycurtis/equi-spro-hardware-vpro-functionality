@@ -1,7 +1,7 @@
 """On-demand ECG captures via the ESP32 receiver.
 
 Flow: request() writes "ECG,<addr>,<seconds>,<flags>,<epoch>" to the receiver, which
-connects to the device the next time it advertises (within ~30 s), sets its clock,
+connects to the device the next time it advertises (within ~60 s), sets its clock,
 starts the capture and forwards each notification as an EQECGD line. Samples are
 reassembled by index and stored in SQLite (table ecg_captures) when the capture ends.
 
@@ -52,7 +52,7 @@ class Capture:
     seconds: int
     test: bool
     status: str = "waiting"
-    detail: str = "waiting for the device to advertise (up to 30 s)"
+    detail: str = "waiting for the device to advertise (up to 60 s)"
     rate: int = 512
     uv_per_lsb: float = 0.0
     total: int | None = None
@@ -148,7 +148,7 @@ class EcgManager:
         elif ev == "STARTED":
             self._set(cap, "recording", "recording")
         elif ev == "TIMEOUT":
-            self._finish(cap, "failed", "device not seen within 45 s (is it on and in range?)")
+            self._finish(cap, "failed", "device not seen within 75 s (is it on and in range?)")
         elif ev == "BUSY":
             self._finish(cap, "failed", "receiver busy with another session")
         elif ev == "ERR":

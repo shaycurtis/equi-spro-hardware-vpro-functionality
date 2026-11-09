@@ -25,7 +25,7 @@ gateway that forwards raw adverts + scan responses can be adapted to it:
 "ts" is the gateway's receive time in Unix ms. Adverts and scan responses may also come as
 separate items (only "adv" or only "rsp").
 
-Each 30 s telemetry burst (device, session tag, sequence) is posted once, with the best RSSI and
+Each 60 s telemetry burst (device, session tag, sequence) is posted once, with the best RSSI and
 the first receive time, joined to the encrypted identity (session ID + horse chip) from the same
 message. Not done yet (needs DynamoDB once several gateways hear one device): de-duplication
 across messages / gateways, and an identity cache across messages.
@@ -170,11 +170,28 @@ def build_measurement(t: proto.Telemetry, ident, device_id: str, org_id: str, ga
         data["batteryLevel"] = int(round(t.battery_soc))
     if t.temp_c is not None:
         data["temperature"] = Decimal(f"{t.temp_c:.2f}")
-    if t.heart_rate is not None:
-        data["heartRate"] = t.heart_rate
     if t.steps is not None:
         data["steps"] = t.steps                          # since the device was switched on
+    data.update(placeholder_horse_metrics(t))
     return data
+
+
+# TEMPORARY placeholders so the app's horse charts have values until the SPRO measures these
+# itself. Remove each one once the firmware sends the real value.
+RESP_PER_HR = 1 / 3     # horse at rest: ~28-44 bpm heart rate, ~8-16 breaths/min
+
+
+def placeholder_horse_metrics(t: proto.Telemetry) -> dict:
+    hr = t.heart_rate or 0                               # no beats counted -> 0, never null
+    out = {
+        "heartRate": hr,
+        "respiration": int(round(hr * RESP_PER_HR)),     # placeholder: derived from heart rate
+        "position": "standing",                          # placeholder: no posture detection yet
+        "positionsSeen": [],
+    }
+    if t.temp_c is not None:
+        out["horseTemperature"] = Decimal(f"{t.temp_c:.2f}")   # placeholder: board temperature
+    return out
 
 
 # -------------------------------------------------------------------------------- handler

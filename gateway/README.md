@@ -17,7 +17,7 @@ Then open http://localhost:8080.
 | `--verbose` | Print every advert, not just one line per reading. |
 | `--duration N` | Stop after N seconds. |
 | `--battery-mah N` | Battery capacity for the drain/runtime estimate (default 1500). |
-| `--mqtt ENDPOINT` | Also publish each burst to AWS IoT Core (postBleData Lambda; see `cloud/README.md`). Certificates in `<repo>/private/iot/`. |
+| `--mqtt [ENDPOINT]` | Also publish each burst to AWS IoT Core (postBleData Lambda; see `cloud/README.md`). Certificates and `endpoint.txt` (the default endpoint) in `<repo>/private/iot/`. |
 | `--mqtt-dry-run` | Build the MQTT messages without AWS; written to `data/mqtt_out/`. |
 | `--mqtt-thing NAME` | IoT thing name = MQTT client ID, gatewayId and topic (default `equi-pc-gateway-dev`). |
 | `--mqtt-certs DIR`, `--mqtt-dump DIR` | Other certificate folder; save every message as JSON. |
@@ -28,7 +28,7 @@ dashboard loads Chart.js from cdn.jsdelivr.net, so the browser needs internet ac
 Dashboard: device cards (battery, temp/RH, steps, heart rate, charge, HorseID, **battery drain
 estimate** in mA and runtime), a **Sessions** strip
 (click one to see only that session; 1h/6h/24h/7d show all data by time), charts, and an
-**ECG on demand** panel (needs `--serial`; the device is contacted at its next advert, up to 30 s).
+**ECG on demand** panel (needs `--serial`; the device is contacted at its next advert, up to 60 s).
 
 Files:
 - `equi_protocol.py`: advert decoder (telemetry v1-v5 + identity v1-v3), mirrors `components/telemetry/include/telemetry.h`.
@@ -38,7 +38,7 @@ Files:
 - `mqtt_publisher.py`: `--mqtt`: one message per device per burst (all advert copies + the latest
   identity), topic `equimetrics/ble/<thing>/adv`, the postBleData input format.
 
-SQLite tables (`data/telemetry.db`, git-ignored): `readings` (one row per 30 s advert, with
+SQLite tables (`data/telemetry.db`, git-ignored): `readings` (one row per 60 s advert, with
 `device_session`, `horse_id`, `heart_rate`), `device_sessions` (session ID, HorseID, start, last seen),
 `ecg_captures` (int16 samples, rate, uV/LSB, session, horse).
 

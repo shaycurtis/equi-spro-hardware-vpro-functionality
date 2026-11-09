@@ -7,7 +7,7 @@ LoRa: device --LoRaWAN--> IoT Core for LoRaWAN --> rule --> postLoraData --> POS
 BLE:  device --advert-->  BLE gateway --MQTT/TLS--> IoT Core --> rule --> postBleData --> same API call
 ```
 
-`post_ble_data/post_ble_data.py` decodes the 30 s telemetry advert (v5) and the encrypted identity
+`post_ble_data/post_ble_data.py` decodes the 60 s telemetry advert (v5) and the encrypted identity
 (session + horse chip) with `gateway/equi_protocol.py`, maps it to the dict `postLoraData` builds,
 and posts it through the same `equimetrics_common` layer (`get_org_id`, `post_measurements`). The
 input format (raw adverts / scan responses as hex) is described at the top of that file.
@@ -23,10 +23,12 @@ Tests (offline, no AWS): `python -m unittest cloud/post_ble_data/test_post_ble_d
 | gatewayId, signalStrength | the gateway message; best RSSI of the burst (>= -70 high, >= -85 medium, else low) |
 | timestamp | gateway receive time of the burst's first advert (Unix ms) |
 | sessionId, horseChipNumber | encrypted identity (session in ms) |
-| batteryLevel, temperature, heartRate, steps | telemetry advert (steps: since power-on) |
+| batteryLevel, temperature, steps | telemetry advert (steps: since power-on) |
+| heartRate | telemetry advert; 0 when no beats were counted (never null) |
+| horseTemperature, respiration, position, positionsSeen | **temporary placeholders** for the app's charts (`placeholder_horse_metrics`): board temperature, round(heartRate / 3), `"standing"`, `[]` |
 | status | Charging / Connected / Disconnected from the USB + charging flags |
 | wifiConnected | false (not in the advert) |
-| fPort, respiration, horseTemperature, perspiration, position(s), lat/long | not sent (not measured / LoRa only) |
+| fPort, perspiration, lat/long | not sent (not measured / LoRa only) |
 
 ## AWS set-up (dev), in order
 
@@ -90,6 +92,7 @@ private key is only offered once) into `<repo>/private/iot/` (git-ignored), rena
 (The public key file isn't needed.)
 
 **c. Endpoint.** Settings -> *Device data endpoint*: `xxxxxxxxxxxx-ats.iot.eu-west-1.amazonaws.com`.
+Save it as one line in `private/iot/endpoint.txt`; then `--mqtt` needs no argument.
 
 **d. Rule.** Message routing -> Rules -> Create rule, name `equimetrics_ble_adv`, SQL version
 2016-03-23:
@@ -104,10 +107,10 @@ Optional error action: CloudWatch logs, to see rule failures.
 **e. Run the PC gateway with MQTT** (`pip install -r gateway/requirements.txt` once, for paho-mqtt):
 
 ```
-python gateway\gateway.py --serial COM4 --web --mqtt xxxxxxxxxxxx-ats.iot.eu-west-1.amazonaws.com
+python gateway\gateway.py --serial COM4 --web --mqtt
 ```
 
-It prints `MQTT: connected` and one `MQTT: published 15B0B4 seq N` per 30 s burst. Check: IoT
+It prints `MQTT: connected` and one `MQTT: published 15B0B4 seq N` per 60 s burst. Check: IoT
 Core -> MQTT test client -> subscribe to `equimetrics/ble/#` (messages arrive), then the
 postBleData logs in CloudWatch (`done: {... 'posted': 1 ...}`) and the measurement in Mongo.
 `--mqtt-dry-run` builds the messages without AWS and writes them to `gateway/data/mqtt_out/`.
