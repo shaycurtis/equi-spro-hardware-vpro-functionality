@@ -28,8 +28,16 @@
 /* CNFG_GEN: EN_ECG (bit19), FMSTR=00 (32768 Hz -> 512 sps base), lead-off and bias off */
 #define GEN_EN_ECG      (1u << 19)
 
-/* CNFG_ECG: RATE[23:22]=00 (512 sps), GAIN[17:16]=10 (80 V/V), DHPF[14]=1 (0.5 Hz), DLPF[13:12]=01 (40 Hz) */
-#define ECG_CFG         ((0u << 22) | (2u << 16) | (1u << 14) | (1u << 12))
+/* CNFG_ECG: RATE[23:22] (00 = 512, 01 = 256 sps with FMSTR = 32768 Hz), GAIN[17:16]=10 (80 V/V),
+ * DHPF[14]=1 (0.5 Hz), DLPF[13:12]=01 (40 Hz) */
+#define ECG_CFG         ((2u << 16) | (1u << 14) | (1u << 12))
+#define ECG_RATE_512    (0u << 22)
+#define ECG_RATE_256    (1u << 22)
+
+/* EN_INT: EINT[23] (ECG FIFO >= EFIT samples), INTB_TYPE[1:0]=11 (open drain, internal 125k
+ * pull-up to OVDD; the pin then idles at 1.8 V, like SDO). MNGR_INT: EFIT[23:19] = samples - 1. */
+#define EN_INT_EINT     (1u << 23)
+#define INTB_OD_PULLUP  3u
 
 /* CNFG_CAL: EN_VCAL[22], VMODE[21]=bipolar, VMAG[20]=0.5 mV, FCAL[14:12]=100 (FMSTR/2^15 = 1 Hz), FIFTY[11] */
 #define CAL_TEST        ((1u << 22) | (1u << 21) | (1u << 20) | (4u << 12) | (1u << 11))
@@ -126,21 +134,34 @@ esp_err_t max30001_probe(uint32_t *info)
     return ESP_OK;
 }
 
-esp_err_t max30001_ecg_start(bool test_signal)
+esp_err_t max30001_ecg_start(bool test_signal, uint16_t rate_hz, uint8_t fifo_irq_samples)
 {
+    if (rate_hz != 512 && rate_hz != 256) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (fifo_irq_samples > 32) {
+        fifo_irq_samples = 32;
+    }
     ESP_RETURN_ON_ERROR(soft_reset(), TAG, "reset");
-    ESP_RETURN_ON_ERROR(wr(REG_EN_INT, 0), TAG, "en_int");      /* polled, no interrupts */
+    if (fifo_irq_samples) {
+        ESP_RETURN_ON_ERROR(wr(REG_MNGR_INT, (uint32_t)(fifo_irq_samples - 1) << 19), TAG, "mngr_int");
+        ESP_RETURN_ON_ERROR(wr(REG_EN_INT, EN_INT_EINT | INTB_OD_PULLUP), TAG, "en_int");
+    } else {
+        ESP_RETURN_ON_ERROR(wr(REG_EN_INT, 0), TAG, "en_int");  /* polled, no interrupts */
+    }
     ESP_RETURN_ON_ERROR(wr(REG_EN_INT2, 0), TAG, "en_int2");
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_GEN, GEN_EN_ECG), TAG, "gen");
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_CAL, test_signal ? CAL_TEST : 0), TAG, "cal");
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_EMUX, test_signal ? EMUX_TEST : EMUX_NORMAL), TAG, "emux");
-    ESP_RETURN_ON_ERROR(wr(REG_CNFG_ECG, ECG_CFG), TAG, "ecg");
+    ESP_RETURN_ON_ERROR(wr(REG_CNFG_ECG, ECG_CFG | (rate_hz == 256 ? ECG_RATE_256 : ECG_RATE_512)), TAG, "ecg");
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_RTOR1, RTOR1_CFG), TAG, "rtor1");   /* heart-rate detector */
     ESP_RETURN_ON_ERROR(wr(REG_CNFG_RTOR2, RTOR2_CFG), TAG, "rtor2");
     vTaskDelay(pdMS_TO_TICKS(50));
     ESP_RETURN_ON_ERROR(wr(REG_SYNCH, 0), TAG, "synch");         /* start conversions */
     ESP_RETURN_ON_ERROR(wr(REG_FIFO_RST, 0), TAG, "fifo_rst");
-    ESP_LOGI(TAG, "ECG started: 512 sps, gain 80, %s", test_signal ? "INTERNAL 1 Hz TEST SIGNAL" : "electrodes");
+    ESP_LOGI(TAG, "ECG started: %u sps, gain 80, %s%s", rate_hz,
+             test_signal ? "INTERNAL 1 Hz TEST SIGNAL" : "electrodes",
+             fifo_irq_samples ? ", FIFO interrupt" : "");
     return ESP_OK;
 }
 

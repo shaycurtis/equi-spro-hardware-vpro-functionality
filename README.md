@@ -32,22 +32,40 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | BLE telemetry | ✅ Advert v5 every 30 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
-| Sessions + RFID HorseID | ✅ Session = Unix time at boot; tag scanned at boot (JY-LD6900, 9600 ASCII); per-session dashboard view |
+| Sessions + RFID HorseID | ✅ Session (Unix time) starts at the tag scan, or scan-button override (chip "unknown"); JY-LD6900, 9600 ASCII; per-session dashboard view |
 | Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate. Finding the extra current is next |
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
-| SD card EDF logging + Wi-Fi upload (phase 3) | ⏳ Not started |
+| SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 512/256 Hz per `config.json`, interrupt-driven (light sleep kept), 0 overflows |
+| IMU logging, Wi-Fi upload | ⏳ Next (IMU: accel + gyro 104/416 Hz, mag 104 Hz, separate `imu_…edf`) |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
 
 ## Device behaviour (user view)
 
 0. **Locked (no Wi-Fi saved):** power on and **both LEDs are steady white**: provisioning mode (below).
 1. **Power on:** hold the power button ~1.5 s. Green double flash, then **both LEDs blink green**: scan the horse's tag.
-2. **Tag read** (or 2 min timeout): D1 **steady blue** until a trusted gateway has received the session (encrypted identity), then a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
+2. **Tag read** starts the session and its SD recording. No tag? Press the **scan button** during the wait to start it anyway (chip "unknown"). After a 2 min timeout with neither, no session starts (press the scan button to scan again). Then: D1 **steady blue** until a trusted gateway has received the session (encrypted identity), then a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
 3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
 4. **Plugging in USB** while running on battery ends the session automatically (after 2 s): orange flashes, then charge-only (D2 red/green). Booting while already on USB keeps running (bench use).
 5. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (**both LEDs** red = charging, green = full, orange = fault).
 6. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white.
+
+### SD card recording
+
+- `/sdcard/config.json` (created with defaults if missing; later edited from the web app):
+  `{"version":1,"ecg":{"log":true,"rate_hz":512},"imu":{"log":false,"rate_hz":104}}`
+  (ECG 256/512 Hz; IMU 104/416 Hz for accel + gyro, magnetometer always 104 Hz).
+- Each session writes `/sessions/<session>/<type>_<device id>_<chip number>_<session>.edf`, e.g.
+  `/sessions/1794188521/ecg_15B0B4_999012345678436_1794188521.edf`. ECG and IMU are separate files.
+- ECG EDF: 1 s records, int16, 0.381 uV/LSB, header patient = `HorseID <chip>`, recording =
+  `Device EQ-<id> Session <session>`, start = session start (UTC). Written every 30 s with the record
+  count updated and the file synced, so a battery cut loses at most 30 s. A different horse switches
+  to a new session file at the exact sample.
+- The MAX30001 interrupt (INTB, open drain to 1.8 V) wakes the chip every 16 samples; light sleep
+  continues in between. Measured: exactly 512.0 sps, 32 reads/s, 0 overflows. BLE ECG requests tap
+  the same stream (512 Hz only).
+- Check a file: `python tools/edf_info.py F:/sessions/<session>/ecg_…edf` (or open in EDFbrowser).
+- Card: Transcend industrial 32 GB, 815 KB/s write over SPI3 at 20 MHz (ECG needs ~1 KB/s).
 
 ### Wi-Fi provisioning
 

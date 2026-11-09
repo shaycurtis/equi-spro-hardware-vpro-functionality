@@ -5,9 +5,10 @@
  * Phase 2a: slow sensors sampled every 30 s (sensors.h), GNSS parked in backup mode.
  * Phase 2b: each sample is broadcast as a BLE advert burst (telemetry.h).
  * Phase 2d: on-demand ECG over BLE (ecg.h, telemetry/ecg_service.h).
- * Sessions: each boot starts a session (ID = Unix time). At boot the RFID reader waits for
- * the horse's tag (both LEDs flash green); the tag becomes the session's HorseID. A short
- * press of the scan button (SW1) scans again; a different horse starts a new session.
+ * Sessions: at boot the RFID reader waits for the horse's tag (both LEDs flash green). The
+ * session (ID = Unix time) starts when the tag is read, or when the scan button (SW1) is
+ * pressed during the wait (no tag: HorseID unknown). SD recording starts with the session.
+ * Later, a short SW1 press scans again; a different horse starts a new session.
  */
 #include <math.h>
 #include <stdio.h>
@@ -27,6 +28,7 @@
 #include "power.h"
 #include "provisioning.h"
 #include "storage.h"
+#include "recorder.h"
 #include "rfid.h"
 #include "sensors.h"
 #include "status_led.h"
@@ -34,7 +36,7 @@
 
 #define SAMPLE_PERIOD_S  30
 #define ADV_BURST_MS     2000   /* 20 adverts at 100 ms; tune down once gateway reception is known */
-#define RFID_TIMEOUT_S   120    /* how long to wait for a tag before carrying on without one */
+#define RFID_TIMEOUT_S   120    /* how long to wait for a tag (no session starts without one or the override) */
 
 static uint32_t s_dev_id;
 static volatile uint32_t s_session;
@@ -109,10 +111,16 @@ static void log_sample(const sensor_sample_t *s)
 
 /* ------------------------------------------------------------ sessions */
 
-static uint32_t new_session_id(void)
+static uint32_t now_epoch(void)
 {
     uint32_t epoch;
-    if (sensors_get_epoch(&epoch) == ESP_OK) {
+    return sensors_get_epoch(&epoch) == ESP_OK ? epoch : 0;   /* 0 = RTC has no time */
+}
+
+static uint32_t new_session_id(void)
+{
+    uint32_t epoch = now_epoch();
+    if (epoch) {
         return epoch & 0x7FFFFFFF;
     }
     return esp_random() | 0x80000000u;   /* RTC has no time: random, flagged by bit 31 */
@@ -172,22 +180,51 @@ static void show_running_leds(void)
     power_set_charge_led(true);          /* D2 back to the charge state (off unless on USB) */
 }
 
+static volatile bool s_override;   /* scan button pressed while waiting for a tag */
+
+/* Start a session (tag read, or the scan-button override with horse == NULL). */
+static void start_session(uint64_t packed, const char *horse)
+{
+    bool first = s_session == 0;
+    uint32_t epoch = now_epoch();
+    s_session = new_session_id();
+    s_horse = packed;
+    ESP_LOGI(TAG, "session %lu started, HorseID %s%s", (unsigned long)s_session, horse ? horse : "unknown",
+             (s_session & 0x80000000u) ? " (random ID: RTC not set)" : "");
+    publish_identity();
+    if (storage_mounted() && storage_config()->ecg_log) {
+        if (first) {
+            if (recorder_start(s_dev_id, s_session, epoch, storage_config()->ecg_rate_hz, horse) != ESP_OK) {
+                ESP_LOGW(TAG, "ECG recording not started");
+            }
+        } else {
+            recorder_new_session(s_session, epoch, horse);
+        }
+    }
+}
+
 static void on_tag(const rfid_tag_t *tag, void *ctx)
 {
     if (tag) {
         uint64_t packed = rfid_tag_pack(tag);
         char str[16];
         rfid_tag_str(tag, str);
-        if (s_horse && packed != s_horse) {
-            s_session = new_session_id();
-            ESP_LOGI(TAG, "different horse: new session %lu", (unsigned long)s_session);
+        if (!s_session || packed != s_horse) {
+            start_session(packed, str);          /* first tag, or a different horse */
+        } else {
+            ESP_LOGI(TAG, "same horse %s: session %lu continues", str, (unsigned long)s_session);
         }
-        s_horse = packed;
-        ESP_LOGI(TAG, "HorseID %s (session %lu)", str, (unsigned long)s_session);
-        publish_identity();
+    } else if (s_override) {
+        if (!s_session) {
+            start_session(0, NULL);              /* no tag available: HorseID unknown */
+        } else {
+            ESP_LOGI(TAG, "scan cancelled: session %lu continues", (unsigned long)s_session);
+        }
     } else {
-        ESP_LOGW(TAG, "no tag scanned; continuing%s", s_horse ? " with the previous HorseID" : " without a HorseID");
+        ESP_LOGW(TAG, "no tag scanned%s", s_session ? "; session continues" :
+                 ": no session started (press the scan button to scan again)");
     }
+    s_override = false;
     s_scanning = false;
     show_running_leds();
 }
@@ -246,8 +283,14 @@ static void scan_button_task(void *arg)
             status_led_override_clear();
         }
         if (!combo && low_ms >= 200 && low_ms <= 2000) {
-            ESP_LOGI(TAG, "scan button pressed");
-            start_rfid_scan();
+            if (s_scanning) {
+                ESP_LOGI(TAG, "scan button pressed during the scan: override (no tag)");
+                s_override = true;
+                rfid_scan_cancel();          /* on_tag(NULL) then starts the session */
+            } else {
+                ESP_LOGI(TAG, "scan button pressed");
+                start_rfid_scan();
+            }
         }
         low_ms = both_ms = 0;
         combo = false;
@@ -362,13 +405,12 @@ void app_main(void)
 #endif
     }
 
-    s_session = new_session_id();
-    ESP_LOGI(TAG, "session %lu%s", (unsigned long)s_session, (s_session & 0x80000000u) ? " (random: RTC not set)" : "");
+    /* SD recording starts with the session; its hook runs before the card is unmounted. */
+    power_register_shutdown_cb(recorder_shutdown);
 
     char name[24];
     snprintf(name, sizeof(name), "EQ-%s", device_id_get());
-    ESP_ERROR_CHECK(telemetry_ble_init(name));
-    publish_identity();
+    ESP_ERROR_CHECK(telemetry_ble_init(name));   /* identity is published when the session starts */
     power_register_shutdown_cb(telemetry_ble_stop);
     power_register_shutdown_cb(ecg_shutdown);
     ESP_ERROR_CHECK(ecg_init());           /* continuous heart rate from the MAX30001 */

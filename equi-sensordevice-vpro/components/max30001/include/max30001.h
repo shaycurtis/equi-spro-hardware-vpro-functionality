@@ -4,7 +4,7 @@
  * SPI on GPIO39-42, powered by the two XC6221 1.8 V LDOs switched by VCC_CTRL (GPIO13),
  * clocked by the external 32.768 kHz oscillator (also on the 1.8 V rail).
  *
- * ECG is configured for 512 sps, gain 80 V/V, digital HPF 0.5 Hz, LPF 40 Hz, with the
+ * ECG is configured for 512 or 256 sps, gain 80 V/V, digital HPF 0.5 Hz, LPF 40 Hz, with the
  * hardware R-to-R (heart-beat) detector enabled.
  */
 #include <stdbool.h>
@@ -23,8 +23,12 @@ esp_err_t max30001_bus_init(void);
 /* Reset + read INFO. Rail must already be on. Returns ESP_ERR_INVALID_RESPONSE if INFO looks wrong. */
 esp_err_t max30001_probe(uint32_t *info);
 
-/* Configure and start ECG. test_signal: internal +-0.5 mV 1 Hz square wave, electrodes isolated. */
-esp_err_t max30001_ecg_start(bool test_signal);
+/*
+ * Configure and start ECG at 512 or 256 sps. test_signal: internal +-0.5 mV 1 Hz square wave,
+ * electrodes isolated. fifo_irq_samples > 0: INTB (open drain, internal pull-up) goes low while
+ * the ECG FIFO holds at least that many samples; 0 = no interrupt (polled).
+ */
+esp_err_t max30001_ecg_start(bool test_signal, uint16_t rate_hz, uint8_t fifo_irq_samples);
 
 /*
  * Drain the ECG FIFO into `out` (18-bit signed samples). Returns the number read.

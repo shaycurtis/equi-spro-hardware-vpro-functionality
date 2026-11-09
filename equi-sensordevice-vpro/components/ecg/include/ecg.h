@@ -1,9 +1,10 @@
 #pragma once
 /*
- * MAX30001 owner: continuous heart rate (hardware R-to-R detector) plus on-demand ECG
- * captures streamed in fixed-size blocks to a callback.
+ * MAX30001 owner: continuous heart rate (hardware R-to-R detector), an optional continuous
+ * stream (SD recording, 512 or 256 sps) and on-demand ECG captures (512 sps) streamed in
+ * fixed-size blocks to a callback.
  *
- * Samples are int16 at 512 sps: the 18-bit AFE value >> 2, so 1 LSB = ECG_UV_PER_LSB uV
+ * Samples are int16: the 18-bit AFE value >> 2, so 1 LSB = ECG_UV_PER_LSB uV
  * (~0.38 uV at gain 80) and full scale is about +-12.5 mV.
  */
 #include <stdbool.h>
@@ -43,6 +44,17 @@ esp_err_t ecg_start(const ecg_request_t *req);
 void ecg_stop(void);
 
 bool ecg_busy(void);
+
+/* Continuous stream: called from the ECG task with every batch read from the FIFO (<= 32). */
+typedef void (*ecg_stream_cb_t)(const int16_t *samples, size_t n, void *ctx);
+
+/*
+ * Stream samples continuously at 512 or 256 sps (can be called before ecg_init). Light sleep
+ * continues between FIFO reads. While streaming, captures must be 512 sps electrode captures
+ * (they tap the stream); other requests get ESP_ERR_INVALID_STATE.
+ */
+esp_err_t ecg_stream_start(uint16_t rate_hz, ecg_stream_cb_t cb, void *ctx);
+void ecg_stream_stop(void);
 
 /* Shutdown hook: stop a capture and make sure the AFE is unpowered. */
 void ecg_shutdown(void);
