@@ -56,3 +56,7 @@ encrypted with AES-128-CCM under the fleet key (`<repo>/private/fleet_key.bin`, 
 Without the key the gateway still stores readings, but can't attach them to a session or horse.
 Readings heard before the identity are stored with `session_tag` and no `device_session`, and are
 attached when the identity arrives (within 24 h).
+
+Since 2026-11-09 a device session starts at the tag scan (or the scan-button override, HorseID
+"unknown"), not at boot. Until then the device advertises with session tag 0 and no identity, so
+those readings stay without a session; that is expected (the device is on but not on a horse yet).

@@ -33,7 +33,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
 | Sessions + RFID HorseID | ✅ Session (Unix time) starts at the tag scan, or scan-button override (chip "unknown"); JY-LD6900, 9600 ASCII; per-session dashboard view |
-| Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate. Finding the extra current is next |
+| Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate. Parked until the PPK2 is found (see below); SD logging adds to it, overnight test running |
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
 | SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 512/256 Hz per `config.json`, interrupt-driven (light sleep kept), 0 overflows |
@@ -220,10 +220,22 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Next steps
 
-1. **Phase 2e, power:** find the extra ~8 mA (PM profiling, WS2812 standby, XTAL); then shorten
-   the 2 s burst (~17/20 adverts arrive) and tune TX power after the range test.
-2. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
-3. **Respiration** (MAX30001 BioZ or ECG-derived), and checking R-to-R detection on a horse ECG
+**In progress (night of 2026-11-09):** overnight run on battery with SD logging on (ECG 512 Hz +
+IMU 416 Hz) and the PC gateway receiving. In the morning: check the gateway's battery curve (drain
+with logging on vs the ~12-14 mA baseline), each EDF file with `tools/edf_info.py` (record counts vs
+file size, no gaps), and the readings / losses in the dashboard.
+
+1. **Wi-Fi while charging:** use the provisioned networks for time sync, a backend check-in, session
+   file upload, OTA (signature-checked, with rollback) and the trusted-gateway list.
+2. **Web Bluetooth config page:** edit `config.json` settings and view the saved networks from a
+   browser (Chrome on Android / desktop; Bluefy on iOS).
+3. **Power:** the parked PPK2 drain test (SD card is the top suspect for the extra ~8 mA), plus the
+   cost of logging (ECG interrupt every 31 ms, IMU FIFO reads ~30/s at 416 Hz); then shorten the 2 s
+   burst and tune TX power after the range test.
+4. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
+5. **Respiration** (MAX30001 BioZ or ECG-derived), and checking R-to-R detection on a horse ECG
    (large T waves may need WNDW/PTSF tuning).
-4. **Phase 3:** 512 Hz ECG + 416 Hz IMU to SD in EDF; Wi-Fi upload while charging.
-5. Production items: SIG company ID, commercial gateway with BLE connection support (for ECG), AWS backend.
+6. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.
+7. Production items: SIG company ID, off-the-shelf listen-only gateway (active scan + scan
+   responses), per-device keys, AWS backend, test-lab check that +15 dBm stays within the SPRO
+   certification.
