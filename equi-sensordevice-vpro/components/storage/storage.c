@@ -25,7 +25,7 @@ static const char *TAG = "storage";
 
 static sdmmc_card_t *s_card;
 static storage_config_t s_cfg = {
-    .ecg_log = true, .ecg_rate_hz = 256,
+    .ecg_log = false, .ecg_rate_hz = 256,   /* default: no SD logging (it doubles the drain) */
     .imu_log = false, .imu_rate_hz = 104,
 };
 

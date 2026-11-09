@@ -59,7 +59,8 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 ### SD card recording
 
 - `/sdcard/config.json` (created with defaults if missing; later edited from the web app):
-  `{"version":1,"ecg":{"log":true,"rate_hz":256},"imu":{"log":false,"rate_hz":104}}`
+  `{"version":1,"ecg":{"log":false,"rate_hz":256},"imu":{"log":false,"rate_hz":104}}` (no SD
+  logging by default: it roughly doubles the drain)
   (ECG 256/512 Hz; IMU 104/416 Hz for accel + gyro, magnetometer always 104 Hz). `ecg.log` is the
   **automatic (continuous) ECG** recording; off in normal use, where the app starts recordings.
   The defaults only apply when the file is missing: an existing card keeps its values.
@@ -155,6 +156,12 @@ python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default-reset --afte
 - Always pass `--flash-size 16MB`: in Secure Download Mode the ROM rejects addresses above ~2 MB otherwise.
 - Sign with the **spro** key only. The board trusts one key digest (KEY0); slots 1 and 2 are revoked.
 - **Never erase NVS**: it holds the SPro device ID (`15B0B4`), BLE passkey and settings.
+- **A board still on the SPro app** (first VPro flash): also write `build\ota_data_initial.bin`
+  encrypted to 0x320000 in the same command (blank OTA record, so the bootloader picks the factory
+  slot instead of the SPro app in ota_0). Then: read the device ID from the boot log
+  (`using SPro device ID from NVS: …`), have it registered in the dev DB, and provision Wi-Fi.
+  Fit a **blank SD card** (the firmware does not wipe old SPro files; it only writes `config.json` if
+  it is missing). Boards done so far: `15B0B4`, `236B2C`.
 - Check the port first: `esptool -p COM3 --no-stub get-security-info` must say *Secure Boot: Enabled*.
 - Back to the original SPro app (in ota_0): write `equi-sensordevice-blink/recovery/otadata_boot_ota0.bin`
   encrypted to 0x320000 (same esptool options).
