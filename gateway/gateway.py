@@ -103,6 +103,7 @@ class Gateway:
         self.identity: dict[str, tuple[int, str | None]] = {}   # device -> (session, horse_id)
         self.ecg.identity = self.identity
         self.last_time_sync: dict[str, float] = {}
+        self.publisher = None   # MqttPublisher with --mqtt / --mqtt-dry-run
 
     def _drop_old_unique_key(self) -> None:
         """Early databases had UNIQUE(device_id, seq, uptime_min), which silently dropped readings
@@ -149,6 +150,8 @@ class Gateway:
         t = decode(payload)
         if t is None:
             return
+        if self.publisher:
+            self.publisher.add(address, rssi, payload, t)
         self.ecg.addresses[t.device_id] = address
         if isinstance(t, Identity):
             self.on_identity(t)
@@ -304,6 +307,17 @@ async def main() -> None:
     ap.add_argument("--web", metavar="PORT", type=int, nargs="?", const=8080,
                     help="also serve the dashboard (default port 8080)")
     ap.add_argument("--battery-mah", type=float, default=1500, help="battery capacity for drain/runtime estimates")
+    ap.add_argument("--mqtt", metavar="ENDPOINT",
+                    help="also publish each burst to AWS IoT Core at this endpoint (IoT Core -> Settings)")
+    ap.add_argument("--mqtt-dry-run", action="store_true",
+                    help="build the MQTT messages but only write them to --mqtt-dump (no AWS)")
+    ap.add_argument("--mqtt-thing", default="equi-pc-gateway-dev",
+                    help="IoT thing name: MQTT client ID, gatewayId and topic (default equi-pc-gateway-dev)")
+    ap.add_argument("--mqtt-certs", type=Path, default=None,
+                    help="folder with certificate.pem.crt, private.pem.key, AmazonRootCA1.pem "
+                         "(default <repo>/private/iot)")
+    ap.add_argument("--mqtt-dump", type=Path, default=None, metavar="DIR",
+                    help="also save every MQTT message as JSON in this folder")
     ap.add_argument("--fleet-key", type=Path, default=DEFAULT_FLEET_KEY,
                     help="16-byte fleet key file for the encrypted identity (default: <repo>/private/fleet_key.bin)")
     args = ap.parse_args()
@@ -314,6 +328,13 @@ async def main() -> None:
         asyncio.get_running_loop().call_later(args.duration, lambda: stop.set())
 
     gw = Gateway(args.db, args.verbose)
+    if args.mqtt or args.mqtt_dry_run:
+        from mqtt_publisher import DEFAULT_CERT_DIR, MqttPublisher
+        dump = args.mqtt_dump or (Path(__file__).parent / "data" / "mqtt_out" if args.mqtt_dry_run else None)
+        gw.publisher = MqttPublisher(args.mqtt_thing, args.mqtt, args.mqtt_certs or DEFAULT_CERT_DIR,
+                                     dump_dir=dump, dry_run=args.mqtt_dry_run)
+        print(f"MQTT: {'dry run, writing to ' + str(dump) if args.mqtt_dry_run else args.mqtt} "
+              f"(topic {gw.publisher.topic})")
     if args.web:
         from webapp import serve
         serve(args.db, args.web, background=True, ecg=gw.ecg, battery_mah=args.battery_mah)
@@ -342,6 +363,9 @@ async def main() -> None:
                 await summaries()
     finally:
         gw.print_summary()
+        if gw.publisher:
+            gw.publisher.close()
+            print(f"MQTT: {gw.publisher.sent} messages sent, {gw.publisher.failed} failed")
 
 
 async def run_serial(gw: Gateway, port: str, stop: asyncio.Event, summaries) -> None:

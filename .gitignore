@@ -25,3 +25,6 @@ Desktop.ini
 *.SchDocPreview
 *.PcbDocPreview
 *.$$$
+
+# --- Lambda build output ---
+cloud/**/dist/

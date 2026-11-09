@@ -35,6 +35,8 @@
 #include "sensors.h"
 #include "status_led.h"
 #include "telemetry.h"
+#include "cloud.h"
+#include "esp_app_desc.h"
 
 #define SAMPLE_PERIOD_S  30
 #define ADV_BURST_MS     2000   /* 20 adverts at 100 ms; tune down once gateway reception is known */
@@ -49,12 +51,8 @@ static const char *TAG = "main";
 
 /* Temporary bring-up check: 3 s capture of the MAX30001 internal 1 Hz test signal at boot. */
 #define ECG_BOOT_SELFTEST 0
-/* TEMPORARY, development only: the Equimetrics app only connects to device IDs registered in
- * the backend, and this board (EQUI_50787DFFFE15B0B4) is not yet. Until it is, advertise a
- * registered VPro's ID so the app can be tested. Bluetooth name only: files, gateway and
- * identity keep our own ID. Remove (and bump BLE_ADDR_OFFSET) once this board is registered. */
-#define BLE_NAME_TEST_OVERRIDE "EQUI_AC1F09FFFE0A9904"
 #define SD_BOOT_SPEEDTEST 0   /* bring-up: 1 MB write/read test on the SD card at boot */
+#define CLOUD_HW_VERSION  "SPRO-PCBA"   /* hardware as reported to the backend (VPro sends its own) */
 
 #if ECG_BOOT_SELFTEST
 static void selftest_block(const int16_t *s, size_t n, uint32_t first, void *ctx)
@@ -224,6 +222,55 @@ static void app_rec_stop(bool keep)
 }
 
 /* Start a session (tag read, or the scan-button override with horse == NULL). */
+/* ------------------------------------------------------------ charging: backend */
+
+static char s_fw_ver[40];
+static char s_last_update[24];
+
+static void cloud_read_status(cloud_status_t *st)
+{
+    sensor_sample_t s = { 0 };
+    sensors_read(&s);
+    st->battery_pct = s.batt_soc > 100 ? 100 : s.batt_soc < 0 ? 0 : (uint8_t)(s.batt_soc + 0.5f);
+    st->temperature_c = s.temp_c;
+    st->humidity_pct = s.rh;
+    st->charging = power_charge_now() != POWER_CHARGE_DONE;
+}
+
+static void cloud_set_time(uint32_t epoch)
+{
+    sensors_set_time(epoch);   /* RTC + system clock */
+}
+
+/* Charge-only on USB: start the backend task (Wi-Fi to a saved network, time, telemetry). */
+static void on_charge_only(void)
+{
+    device_id_get();           /* opens NVS (saved networks) */
+    if (sensors_init() != ESP_OK) {
+        ESP_LOGW(TAG, "sensors unavailable for the charging telemetry");
+    }
+    const esp_app_desc_t *app = esp_app_get_description();
+    snprintf(s_fw_ver, sizeof(s_fw_ver), "%s", app->version);
+    struct tm bt = { 0 };
+    char built[40];
+    snprintf(built, sizeof(built), "%s %s", app->date, app->time);
+    if (strptime(built, "%b %d %Y %H:%M:%S", &bt)) {
+        strftime(s_last_update, sizeof(s_last_update), "%Y-%m-%dT%H:%M:%SZ", &bt);   /* build time */
+    } else {
+        strlcpy(s_last_update, "1970-01-01T00:00:00Z", sizeof(s_last_update));
+    }
+    cloud_cfg_t c = {
+        .device_id = device_id_get(),   /* "15B0B4": the ID the backend knows the device by */
+        .hw_version = CLOUD_HW_VERSION,
+        .fw_version = s_fw_ver,
+        .last_update = s_last_update,
+        .read_status = cloud_read_status,
+        .set_time = cloud_set_time,
+    };
+    ESP_LOGI(TAG, "charging: backend task for device %s", device_id_get());
+    cloud_charging_start(&c);
+}
+
 static void start_session(uint64_t packed, const char *horse)
 {
     strlcpy(s_horse_str, horse ? horse : "", sizeof(s_horse_str));
@@ -426,6 +473,7 @@ void app_main(void)
 {
     power_early_init();
     ESP_ERROR_CHECK(status_led_init());
+    power_set_charge_only_hook(on_charge_only);   /* Wi-Fi + backend while charging */
     power_boot();               /* returns only when the device should run */
 
     ESP_LOGI(TAG, "VPro running");
@@ -457,17 +505,9 @@ void app_main(void)
     power_register_shutdown_cb(recorder_shutdown);
 
     char name[24];
-    /* The Equimetrics app only lists "EQUI_" + a 16-hex-digit ID (VPro boards use their LoRa
-     * module's EUI-64). We form the EUI-64 from the factory MAC the standard way (FFFE in the
-     * middle), e.g. 50:78:7D:15:B0:B4 -> EQUI_50787DFFFE15B0B4; it still ends in our ID. */
-#ifdef BLE_NAME_TEST_OVERRIDE
-    strlcpy(name, BLE_NAME_TEST_OVERRIDE, sizeof(name));
-#else
-    uint8_t mac[6] = { 0 };
-    esp_efuse_mac_get_default(mac);
-    snprintf(name, sizeof(name), "EQUI_%02X%02X%02XFFFE%02X%02X%02X", mac[0], mac[1], mac[2], mac[3],
-             mac[4], mac[5]);
-#endif
+    /* "EQUI_" + the device ID, as VPro's BOARD_HOSTNAME_PREFIX + ID. The Equimetrics app only
+     * connects to IDs registered in the backend (the devices record for "15B0B4"). */
+    snprintf(name, sizeof(name), "EQUI_%s", device_id_get());
     ESP_ERROR_CHECK(telemetry_ble_init(name));   /* identity is published when the session starts */
     telemetry_set_recording_hooks(app_rec_start, app_rec_stop);
     power_register_shutdown_cb(telemetry_ble_stop);

@@ -17,6 +17,10 @@ Then open http://localhost:8080.
 | `--verbose` | Print every advert, not just one line per reading. |
 | `--duration N` | Stop after N seconds. |
 | `--battery-mah N` | Battery capacity for the drain/runtime estimate (default 1500). |
+| `--mqtt ENDPOINT` | Also publish each burst to AWS IoT Core (postBleData Lambda; see `cloud/README.md`). Certificates in `<repo>/private/iot/`. |
+| `--mqtt-dry-run` | Build the MQTT messages without AWS; written to `data/mqtt_out/`. |
+| `--mqtt-thing NAME` | IoT thing name = MQTT client ID, gatewayId and topic (default `equi-pc-gateway-dev`). |
+| `--mqtt-certs DIR`, `--mqtt-dump DIR` | Other certificate folder; save every message as JSON. |
 
 Requirements: Python 3.10+, `pip install -r requirements.txt` (bleak, pyserial). The
 dashboard loads Chart.js from cdn.jsdelivr.net, so the browser needs internet access.
@@ -31,6 +35,8 @@ Files:
 - `gateway.py`: receiver loop, de-duplication, SQLite, sessions, automatic device time sync.
 - `ecg_manager.py`: on-demand ECG via the receiver (request, reassembly, storage).
 - `webapp.py`: JSON API + `static/index.html`.
+- `mqtt_publisher.py`: `--mqtt`: one message per device per burst (all advert copies + the latest
+  identity), topic `equimetrics/ble/<thing>/adv`, the postBleData input format.
 
 SQLite tables (`data/telemetry.db`, git-ignored): `readings` (one row per 30 s advert, with
 `device_session`, `horse_id`, `heart_rate`), `device_sessions` (session ID, HorseID, start, last seen),

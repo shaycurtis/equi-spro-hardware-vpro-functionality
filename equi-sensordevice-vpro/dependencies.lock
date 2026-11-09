@@ -37,6 +37,6 @@ dependencies:
 direct_dependencies:
 - espressif/cjson
 - espressif/network_provisioning
-manifest_hash: 13eacb59c45cca643c1c3924396100b08298baf915e84c6f235ec1a49f45b036
+manifest_hash: 950e354e1559105e3334a8ee9ebc6dbc52e7abf54ac31c83de9b3213219d77a7
 target: esp32s3
 version: 3.0.0

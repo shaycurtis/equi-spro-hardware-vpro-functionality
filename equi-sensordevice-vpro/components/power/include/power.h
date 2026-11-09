@@ -77,3 +77,12 @@ bool power_shutting_down(void);
 
 bool power_usb_present(void);
 power_charge_t power_charge_state(void);
+
+/* Charge state read from the pins now (no fault tracking); usable before power_start(). */
+power_charge_t power_charge_now(void);
+
+/* Called once when the device enters charge-only mode on USB (from power_boot, before any app
+ * task runs), e.g. to start the Wi-Fi / backend work. Must return quickly (start a task).
+ * Register before power_boot(). */
+typedef void (*power_charge_only_hook_t)(void);
+void power_set_charge_only_hook(power_charge_only_hook_t fn);

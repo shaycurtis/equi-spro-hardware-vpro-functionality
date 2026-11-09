@@ -132,8 +132,18 @@ static void rails_off(void)
 static void sleep_pins_setup(void);
 static bool s_booting;   /* inside power_boot(): no app tasks running yet */
 static bool s_prov_gesture;
+static power_charge_only_hook_t s_charge_hook;
 
 bool power_boot_prov_gesture(void) { return s_prov_gesture; }
+void power_set_charge_only_hook(power_charge_only_hook_t fn) { s_charge_hook = fn; }
+
+power_charge_t power_charge_now(void)
+{
+    if (!power_usb_present()) {
+        return POWER_CHARGE_NO_USB;
+    }
+    return gpio_get_level(BOARD_PIN_CHG_IND) ? POWER_CHARGE_DONE : POWER_CHARGE_CHARGING;
+}
 
 static void show_charge(power_charge_t c)
 {
@@ -168,6 +178,9 @@ static void __attribute__((noreturn)) charge_only_sleep(void)
     }
 
     wait_btn_release();   /* the press that turned the device off is not a power-on */
+    if (s_charge_hook) {
+        s_charge_hook();  /* e.g. Wi-Fi + backend work while charging (its own task) */
+    }
     chg_trk_t trk = { .last = -1 };
     power_charge_t shown = (power_charge_t)-1;
     for (;;) {

@@ -37,7 +37,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
 | SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 256 (default) / 512 Hz per `config.json`, mV (as VPro), interrupt-driven (light sleep kept), 0 overflows |
-| Live ECG + app recordings | ✅ VPro-compatible BLE services (Raw ECG 256 sps, Heart Rate, ECG control); works with the **Equimetrics (VPro) app**; app recordings saved as their own EDF files. App needs a backend-registered ID: **spoofed name for now** (see below) |
+| Live ECG + app recordings | ✅ VPro-compatible BLE services (Raw ECG 256 sps, Heart Rate, ECG control); works with the **Equimetrics (VPro) app**; app recordings saved as their own EDF files. App needs a backend-registered ID: this board is registered on dev as `15B0B4` |
 | SD card IMU logging | ✅ `imu_…edf`: accel ±16 g + gyro ±2000 dps at 104/416 Hz, LIS2MDL mag at 104 Hz (sensor hub), FIFO + INT1, 0 overruns |
 | Wi-Fi upload | ⏳ Not started; VPro's backend API mapped (see "VPro backend API" below) |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
@@ -103,14 +103,14 @@ existing **Equimetrics app** works unchanged. Details: `components/telemetry/liv
   provisioning once the backend is connected). Bonds are stored in NVS.
 - **Advertising:** a second, connectable advert every 1 s for the app (VPro's layout: flags + Heart
   Rate + Raw ECG UUID, name in the scan response), next to the 30 s telemetry bursts. Name =
-  `EQUI_` + 16 hex digits (VPro uses its LoRa EUI-64); ours is the factory MAC as an EUI-64,
-  `EQUI_50787DFFFE15B0B4`. The BT address is the chip's BT MAC + `BLE_ADDR_OFFSET` (VPro adds 1 to get
-  past iOS's name cache; bump it after any name change).
-- **The app only connects to device IDs registered in the backend.** It lists other `EQUI_` names but
-  says "It was not possible to connect with the device" without even connecting. Until this board is
-  registered on dev, `BLE_NAME_TEST_OVERRIDE` in `main/main.c` advertises a registered VPro's ID
-  (`EQUI_AC1F09FFFE0A9904`): **development only**, Bluetooth name only (files, gateway and identity keep
-  `15B0B4`). Remove it (and bump `BLE_ADDR_OFFSET`) once `50787DFFFE15B0B4` is registered.
+  `EQUI_` + the device ID (VPro: `BOARD_HOSTNAME_PREFIX` + its LoRa EUI-64), here `EQUI_15B0B4`. The
+  BT address is the chip's BT MAC + `BLE_ADDR_OFFSET` (VPro adds 1 to get past iOS's name cache;
+  bump it after any name change; now 4).
+- **The app only connects to device IDs registered in the backend.** It lists any `EQUI_` name but
+  says "It was not possible to connect with the device" without even connecting to an unregistered
+  one (tested: a registered VPro's ID worked, `EQUI_15B0B4` and `EQUI_50787DFFFE15B0B4` did not while
+  unregistered). This board is registered on dev as **`15B0B4`** (devices record, added by hand), the
+  same ID the files, the gateway, the charging telemetry and postBleData use.
 - Measured: 1529-1537 notifications/min (256 sps), 0 dropped at MTU 247; a phone reconnect mid-
   recording dropped 5 notifications while the MTU was renegotiated, the recording carried on.
 - Not done yet: lead-off detection (status says "leads on" while beats are detected), respiration.
@@ -282,9 +282,8 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Next steps
 
-1. **Register this board on the dev backend** as `50787DFFFE15B0B4`, then remove
-   `BLE_NAME_TEST_OVERRIDE`. Decide whether the 16-digit ID becomes the device ID everywhere (files,
-   uploads, gateway), as the VPro backend expects.
+1. **Live BLE data to the backend:** `cloud/post_ble_data` (postBleData Lambda, tested offline),
+   then the PC gateway's `--mqtt` publisher and the IoT Core thing / rule (`cloud/README.md`).
 2. **Wi-Fi while charging: file offload to the dev backend** with VPro's endpoints (below): prepare ->
    PUT to the pre-signed URL -> process; then charging telemetry and the device event log; firmware
    check + remote `setup` (config). Needs the dev URLs and API keys (kept out of git, like VPro's

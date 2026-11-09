@@ -30,8 +30,9 @@ static volatile int64_t s_gw_seen_us = -1;   /* last scan request from a gateway
 static volatile uint32_t s_scan_reqs;
 
 /* Added to the chip's BT MAC (VPro adds 1, to get past iOS caching). Bump it to make phones see
- * a new device after a name change (iOS keeps the old name per address): now 3 (spoofed ID). */
-#define BLE_ADDR_OFFSET 3
+ * a new device after a name change (iOS keeps the old name per address): now 4 (EQUI_15B0B4
+ * again, after the spoofed-ID test on 3). */
+#define BLE_ADDR_OFFSET 4
 #define ADV_INSTANCE 0       /* telemetry bursts (gateway): MSD advert + encrypted identity */
 #define APP_ADV_INSTANCE 1   /* the app: connectable, with the name the app filters on */
 #define APP_ADV_ITVL_MS 1000 /* continuous, so the app finds us any time (as VPro) */
