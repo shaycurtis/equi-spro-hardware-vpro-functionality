@@ -56,5 +56,17 @@ typedef void (*ecg_stream_cb_t)(const int16_t *samples, size_t n, void *ctx);
 esp_err_t ecg_stream_start(uint16_t rate_hz, ecg_stream_cb_t cb, void *ctx);
 void ecg_stream_stop(void);
 
+/*
+ * Live tap (Bluetooth live ECG): 256 sps raw 18-bit samples (sign-extended, 4x the int16
+ * resolution), whatever else is running. The SD stream keeps its own rate: at 512 sps the tap
+ * takes every other sample. With no SD stream, a 512 sps stream is started for the tap (so a
+ * gateway capture still works). rr_ms is the beat-to-beat interval of a beat detected since
+ * the last call (0 = none). Called from the ECG task: keep it short, never block.
+ */
+#define ECG_LIVE_RATE_HZ   256
+typedef void (*ecg_live_cb_t)(const int32_t *raw18, size_t n, uint16_t rr_ms, void *ctx);
+esp_err_t ecg_live_start(ecg_live_cb_t cb, void *ctx);
+void ecg_live_stop(void);
+
 /* Shutdown hook: stop a capture and make sure the AFE is unpowered. */
 void ecg_shutdown(void);

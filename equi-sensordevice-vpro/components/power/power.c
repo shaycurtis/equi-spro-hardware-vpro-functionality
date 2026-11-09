@@ -22,6 +22,10 @@ static const char *TAG = "power";
 #define TASK_PERIOD_MS       250
 #define FAULT_WINDOW_MS      3000
 #define USB_STOP_DEBOUNCE_MS 2000   /* USB must stay present this long before auto-stop */
+#define USB_LOSS_DEBOUNCE_MS 1000   /* ...and absent this long before we count as on battery:
+                                     * PWR_GD can dip for one poll (seen as the RFID reader
+                                     * powers up), which then looked like a battery -> USB
+                                     * plug-in and powered the device off */
 
 /* Survives software/panic/watchdog resets (not power-on): was the latch on? */
 static RTC_NOINIT_ATTR uint32_t s_latched_magic;
@@ -392,6 +396,7 @@ static void power_task(void *arg)
     chg_trk_t trk = { .last = -1 };
     bool armed = false;   /* ignore the press that powered us on until it's released */
     int64_t usb_since = -1;   /* when USB appeared after running on battery */
+    int64_t usb_lost_at = -1; /* when USB went away while we were on USB */
 
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(TASK_PERIOD_MS));
@@ -450,6 +455,17 @@ static void power_task(void *arg)
             continue;   /* keep s_charge at "no USB" until the debounce settles */
         }
         usb_since = -1;
+
+        /* USB -> battery only counts once it has lasted USB_LOSS_DEBOUNCE_MS. */
+        if (c == POWER_CHARGE_NO_USB && s_charge != POWER_CHARGE_NO_USB) {
+            if (usb_lost_at < 0) {
+                usb_lost_at = now_ms();
+            }
+            if (now_ms() - usb_lost_at < USB_LOSS_DEBOUNCE_MS) {
+                continue;
+            }
+        }
+        usb_lost_at = -1;
 
         if (c != s_charge) {
             ESP_LOGI(TAG, "Charge state: %s", charge_name(c));

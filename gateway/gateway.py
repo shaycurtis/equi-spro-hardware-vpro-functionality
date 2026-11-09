@@ -27,7 +27,7 @@ from bleak.backends.scanner import AdvertisementData
 
 from ecg_manager import EcgManager
 import equi_protocol
-from equi_protocol import COMPANY_ID, DEFAULT_FLEET_KEY, SESSION_RANDOM_BIT, Identity, Telemetry, decode
+from equi_protocol import COMPANY_ID, DEFAULT_FLEET_KEY, Identity, Telemetry, decode, session_start
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -226,10 +226,8 @@ class Gateway:
 
     def _touch_session(self, device_id: str, session: int, count: bool) -> None:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if session & SESSION_RANDOM_BIT:
-            started = None
-        else:
-            started = datetime.fromtimestamp(session, timezone.utc).isoformat(timespec="seconds")
+        start = session_start(session)
+        started = None if start is None else datetime.fromtimestamp(start, timezone.utc).isoformat(timespec="seconds")
         self.db.execute(
             "INSERT INTO device_sessions (device_id, session_id, started_at, first_seen, last_seen, readings) "
             "VALUES (?,?,?,?,?,?) ON CONFLICT (device_id, session_id) DO UPDATE SET last_seen = excluded.last_seen, "
@@ -253,7 +251,8 @@ class Gateway:
         uptime = r["uptime_min"]
         if uptime is None:   # v2: derive from the session start when it is a real timestamp
             sess = r["session"]
-            uptime = 0 if sess is None or sess & SESSION_RANDOM_BIT else max(0, int(time.time() - sess) // 60)
+            start = None if sess is None else session_start(sess)
+            uptime = 0 if start is None else max(0, int(time.time() - start) // 60)
         cur = self.db.execute(
             """INSERT INTO readings
                (received_at, device_id, seq, uptime_min, battery_soc, battery_mv, temp_c, humidity,

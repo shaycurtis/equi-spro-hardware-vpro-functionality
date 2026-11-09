@@ -25,6 +25,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from equi_protocol import session_is_random
+
 HERE = Path(__file__).parent
 STATIC = HERE / "static"
 DEFAULT_DB = HERE / "data" / "telemetry.db"
@@ -152,7 +154,7 @@ def api_sessions(db: Path, device: str) -> list[dict]:
         r["start_t"] = int(datetime.fromisoformat(start).timestamp())
         r["last_t"] = last
         r["live"] = i == 0 and now - last < 3 * SAMPLE_PERIOD_S
-        r["random_id"] = bool(r["session_id"] & (1 << 31))
+        r["random_id"] = session_is_random(r["session_id"])
     return rows
 
 

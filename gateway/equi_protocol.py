@@ -9,7 +9,12 @@ Manufacturer Specific Data, company ID 0xFFFF (test ID - replace for production)
   E9 04 ...  telemetry v4 (v3 + heart rate)            - advert
   E9 05 ...  telemetry v5 (1-byte session tag)         - advert
   E9 81 ...  identity v1 (session ID, HorseID, clear) - scan response (older firmware)
-  E9 82 ...  identity v2 (AES-CCM encrypted)          - scan response, needs the fleet key
+  E9 82 ...  identity v2 (AES-CCM, 4-byte session s)   - scan response (older firmware)
+  E9 83 ...  identity v3 (AES-CCM, 8-byte session ms)  - scan response, needs the fleet key
+
+Session IDs: older firmware used Unix seconds (bit 31 = random); current firmware uses Unix
+milliseconds, as the VPro platform does (bit 52 = random). Use session_is_random() and
+session_start() rather than testing bits directly.
 """
 from __future__ import annotations
 
@@ -32,7 +37,22 @@ FLAG_RTC_VALID = 1 << 4
 FLAG_RFID_SCAN = 1 << 5
 FLAG_NO_GATEWAY = 1 << 6   # no trusted gateway heard it lately: connect + write to pair
 
-SESSION_RANDOM_BIT = 1 << 31   # session is random (device RTC had no time), not a timestamp
+SESSION_RANDOM_BIT = 1 << 52      # ms session is random (device RTC had no time), not a timestamp
+SESSION_RANDOM_BIT_S = 1 << 31    # same, for older firmware's seconds session IDs
+_MS_THRESHOLD = 10 ** 11          # IDs above this are milliseconds (10^11 s is the year 5138)
+
+
+def session_is_random(session: int) -> bool:
+    if session < 1 << 32:
+        return bool(session & SESSION_RANDOM_BIT_S)
+    return bool(session & SESSION_RANDOM_BIT)
+
+
+def session_start(session: int) -> Optional[float]:
+    """Unix time (s) the session started, or None if the ID is random."""
+    if session_is_random(session):
+        return None
+    return session / 1000 if session > _MS_THRESHOLD else float(session)
 
 # Fleet key (16 bytes) for the encrypted identity. Kept in <repo>/private/ (git-ignored), the
 # same file the firmware embeds. Never commit it or send it anywhere.
@@ -106,14 +126,25 @@ def _flags(t: dict, flags: int) -> None:
 
 def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
     """Decode the bytes after the company ID. Returns None if it is not ours / unknown."""
+    global bad_identity
     if len(payload) < 2 or payload[0] != MAGIC:
         return None
     kind = payload[1]
     dev = payload[2:5].hex().upper() if len(payload) >= 5 else ""
     hr = None
 
+    if kind == 0x83 and len(payload) >= 27:
+        if _ccm is None:
+            return None
+        try:
+            pt = _ccm.decrypt(payload[2:9], payload[9:27], payload[0:9])
+        except InvalidTag:
+            bad_identity += 1
+            return None
+        session, = struct.unpack_from("<Q", pt, 0)
+        return Identity(device_id=dev, session=session, horse_id=horse_id_str(int.from_bytes(pt[8:14], "little")))
+
     if kind == 0x82 and len(payload) >= 23:
-        global bad_identity
         if _ccm is None:
             return None   # no fleet key loaded: cannot read it
         nonce = payload[2:9]   # device_id + random
@@ -199,4 +230,10 @@ if __name__ == "__main__":
     i2 = decode(hdr + ct)
     assert isinstance(i2, Identity) and i2.session == 1794100000 and i2.horse_id == "900002600096932", i2
     assert decode(hdr + bytes([ct[0] ^ 1]) + ct[1:]) is None and bad_identity == 1   # tampered
+    hdr3 = bytes([MAGIC, 0x83, 0x15, 0xB0, 0xB4]) + os.urandom(4)
+    ct3 = _ccm.encrypt(hdr3[2:9], struct.pack("<Q", 1794100000123) + packed.to_bytes(6, "little"), hdr3)
+    i3 = decode(hdr3 + ct3)
+    assert isinstance(i3, Identity) and i3.session == 1794100000123 and i3.horse_id == "900002600096932", i3
+    assert session_start(1794100000123) == 1794100000.123 and session_start(1794100000) == 1794100000
+    assert session_is_random((1 << 52) | 5) and session_is_random((1 << 31) | 5) and not session_is_random(1794100000123)
     print("decode self-test OK:", t.to_record(), i, t5, i2)

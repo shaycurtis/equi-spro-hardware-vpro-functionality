@@ -32,13 +32,14 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | BLE telemetry | ✅ Advert v5 every 30 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
-| Sessions + RFID HorseID | ✅ Session (Unix time) starts at the tag scan, or scan-button override (chip "unknown"); JY-LD6900, 9600 ASCII; per-session dashboard view |
-| Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate. Parked until the PPK2 is found (see below); SD logging adds to it, overnight test running |
+| Sessions + RFID HorseID | ✅ Session (Unix time **in ms**, as VPro) starts at the tag scan, or scan-button override (chip "Unknown"); JY-LD6900, 9600 ASCII; per-session dashboard view |
+| Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate; with ECG 512 Hz + IMU 416 Hz logging **~28 mA** (≈2.2 days). Parked until the PPK2 is found (see below) |
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 30 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
-| SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 512/256 Hz per `config.json`, interrupt-driven (light sleep kept), 0 overflows |
+| SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 256 (default) / 512 Hz per `config.json`, mV (as VPro), interrupt-driven (light sleep kept), 0 overflows |
+| Live ECG + app recordings | ✅ VPro-compatible BLE services (Raw ECG 256 sps, Heart Rate, ECG control); works with the **Equimetrics (VPro) app**; app recordings saved as their own EDF files. App needs a backend-registered ID: **spoofed name for now** (see below) |
 | SD card IMU logging | ✅ `imu_…edf`: accel ±16 g + gyro ±2000 dps at 104/416 Hz, LIS2MDL mag at 104 Hz (sensor hub), FIFO + INT1, 0 overruns |
-| Wi-Fi upload | ⏳ Not started |
+| Wi-Fi upload | ⏳ Not started; VPro's backend API mapped (see "VPro backend API" below) |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
 
 ## Device behaviour (user view)
@@ -48,23 +49,36 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 2. **Tag read** starts the session and its SD recording. No tag? Press the **scan button** during the wait to start it anyway (chip "unknown"). After a 2 min timeout with neither, no session starts (press the scan button to scan again). Then: D1 **steady blue** until a trusted gateway has received the session (encrypted identity), then a short blink every 5 s, **green while a gateway is hearing it, blue if not**, D2 off (or charge colour on USB). The **scan button (SW1)** rescans; a different horse starts a new session.
 3. **Running:** heart rate monitored continuously; every 30 s, sample sensors and send a BLE advert burst. The chip light-sleeps in between.
 4. **Plugging in USB** while running on battery ends the session automatically (after 2 s): orange flashes, then charge-only (D2 red/green). Booting while already on USB keeps running (bench use).
-5. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (**both LEDs** red = charging, green = full, orange = fault).
-6. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white.
+5. **Live ECG (Equimetrics app):** the app lists the device, pairs (passkey **111111**, asked once per
+   phone) and shows the live ECG; recordings started in the app are saved to the SD card (below).
+6. **Power off:** hold the power button 2 s (orange, then 3 orange flashes). On battery the board is fully unpowered; on USB it goes to charge-only (**both LEDs** red = charging, green = full, orange = fault).
+7. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white.
 
 ### SD card recording
 
 - `/sdcard/config.json` (created with defaults if missing; later edited from the web app):
-  `{"version":1,"ecg":{"log":true,"rate_hz":512},"imu":{"log":false,"rate_hz":104}}`
-  (ECG 256/512 Hz; IMU 104/416 Hz for accel + gyro, magnetometer always 104 Hz).
+  `{"version":1,"ecg":{"log":true,"rate_hz":256},"imu":{"log":false,"rate_hz":104}}`
+  (ECG 256/512 Hz; IMU 104/416 Hz for accel + gyro, magnetometer always 104 Hz). `ecg.log` is the
+  **automatic (continuous) ECG** recording; off in normal use, where the app starts recordings.
+  The defaults only apply when the file is missing: an existing card keeps its values.
 - Each session writes `/sessions/<session>/<type>_<device id>_<chip number>_<session>.edf`, e.g.
-  `/sessions/1794188521/ecg_15B0B4_999012345678436_1794188521.edf`. ECG and IMU are separate files.
-- ECG EDF: 1 s records, int16, 0.381 uV/LSB, header patient = `HorseID <chip>`, recording =
-  `Device EQ-<id> Session <session>`, start = session start (UTC). Written every 30 s with the record
-  count updated and the file synced, so a battery cut loses at most 30 s. A different horse switches
-  to a new session file at the exact sample.
+  `/sessions/1794211982000/ecg_15B0B4_999012345678436_1794211982000.edf` (session ID = Unix time in
+  ms, chip `Unknown` without a tag: the VPro platform's naming, whose uploader reads the session from
+  the folder and the other fields from the file name). ECG and IMU are separate files.
+- **App recordings** (automatic ECG off): every `start` from the app writes its own ECG file in the
+  session's folder, named after the recording's start time in ms (the app's recording ID):
+  `ecg_15B0B4_<chip>_<startMs>.edf` (folder = the recording ID if no session has started). Saved when
+  the timer ends (`finished`) or on `stop`, deleted on `discard`, saved on power-off. With automatic
+  ECG on and a session running, the session file already has the ECG: the app gets the live view only.
+- ECG EDF: 1 s records, int16, 0.381 uV/LSB, **mV** (-12.5 .. 12.49962), header patient = the chip
+  number (or `Unknown`), recording = `Device EQUI_<id> Session <session>`, start = session start
+  (UTC). Written every 30 s (app recordings every 5 s) with the record count updated and the file
+  synced, so a battery cut loses at most that much. A different horse switches to a new session file
+  at the exact sample.
 - The MAX30001 interrupt (INTB, open drain to 1.8 V) wakes the chip every 16 samples; light sleep
-  continues in between. Measured: exactly 512.0 sps, 32 reads/s, 0 overflows. BLE ECG requests tap
-  the same stream (512 Hz only).
+  continues in between. Measured: exactly 512.0 sps, 32 reads/s, 0 overflows. Gateway ECG requests
+  tap the same stream (512 Hz only); the app's live ECG takes 256 Hz from it (every other sample at
+  512 Hz).
 - IMU EDF: AccX/Y/Z (g, 0.488 mg/LSB), GyrX/Y/Z (dps, 70 mdps/LSB) at the IMU rate, MagX/Y/Z (uT,
   0.15 uT/LSB) at 104 Hz, raw sensor axes. The record duration is the IMU's real one from its
   oscillator trim (e.g. 0.99552 s at "416 Hz" = 417.87 Hz), so it stays aligned with the ECG's
@@ -74,6 +88,32 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
   the centre). Measured: 25137 accel + gyro and 6285 mag samples per minute, 0 overruns.
 - Check a file: `python tools/edf_info.py F:/sessions/<session>/ecg_…edf` (or open in EDFbrowser).
 - Card: Transcend industrial 32 GB, 815 KB/s write over SPI3 at 20 MHz (ECG needs ~1 KB/s).
+
+### Live ECG with the Equimetrics app (VPro-compatible BLE)
+
+The board offers the same BLE services as the VPro firmware (`BLE_Local` in the VPro platform), so the
+existing **Equimetrics app** works unchanged. Details: `components/telemetry/live_service.h`.
+
+- **Services:** Raw ECG (256 sps, up to 10 samples of 16 bytes per notification: ms timestamp, raw
+  18-bit value, status, RR interval), Heart Rate (0x180D, every 1 s), Respiration (present, not sent
+  yet), ECG control (`start` / `stop` / `discard`, duration (cumulative), recording ID, status, total
+  duration). The app's flow: set recording ID + duration, `start`, live view, `stop` / `discard`.
+- **Pairing:** every characteristic needs an encrypted link (as VPro); we request MITM, so the phone
+  asks for the passkey **111111** (`TELEMETRY_BLE_PASSKEY`; to be generated per device at
+  provisioning once the backend is connected). Bonds are stored in NVS.
+- **Advertising:** a second, connectable advert every 1 s for the app (VPro's layout: flags + Heart
+  Rate + Raw ECG UUID, name in the scan response), next to the 30 s telemetry bursts. Name =
+  `EQUI_` + 16 hex digits (VPro uses its LoRa EUI-64); ours is the factory MAC as an EUI-64,
+  `EQUI_50787DFFFE15B0B4`. The BT address is the chip's BT MAC + `BLE_ADDR_OFFSET` (VPro adds 1 to get
+  past iOS's name cache; bump it after any name change).
+- **The app only connects to device IDs registered in the backend.** It lists other `EQUI_` names but
+  says "It was not possible to connect with the device" without even connecting. Until this board is
+  registered on dev, `BLE_NAME_TEST_OVERRIDE` in `main/main.c` advertises a registered VPro's ID
+  (`EQUI_AC1F09FFFE0A9904`): **development only**, Bluetooth name only (files, gateway and identity keep
+  `15B0B4`). Remove it (and bump `BLE_ADDR_OFFSET`) once `50787DFFFE15B0B4` is registered.
+- Measured: 1529-1537 notifications/min (256 sps), 0 dropped at MTU 247; a phone reconnect mid-
+  recording dropped 5 notifications while the MTU was renegotiated, the recording carried on.
+- Not done yet: lead-off detection (status says "leads on" while beats are detected), respiration.
 
 ### Wi-Fi provisioning
 
@@ -134,7 +174,10 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 - **Telemetry advert v5 + encrypted identity scan response:** `equi-sensordevice-vpro/components/telemetry/include/telemetry.h`
   (decoder: `gateway/equi_protocol.py`). Company ID `0xFFFF` is a **test ID**, so get an Equimetrics SIG ID for production.
-- **ECG GATT service:** `equi-sensordevice-vpro/components/telemetry/ecg_service.h` (start/stop/set-time, 112-sample notifications).
+- **ECG GATT service (gateway):** `equi-sensordevice-vpro/components/telemetry/ecg_service.h` (start/stop/set-time, 112-sample notifications).
+- **Live ECG / app services (VPro-compatible):** `equi-sensordevice-vpro/components/telemetry/live_service.h`.
+- **Identity v3** (0x83): 8-byte session ID in ms (bit 52 = random, so JavaScript keeps it exact); the
+  gateway still reads v2 (4-byte seconds).
 - **Receiver serial lines:** top of `gateway-receiver/main/receiver_main.c` (`EQADV`, `EQECG*`, `ECG,...` command).
 
 ## Gotchas learned (read before changing things)
@@ -184,6 +227,16 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
   identity is in the scan response). The connect-to-pair path above is a **dev shortcut** only; in
   production the trusted-gateway list will come from the SD card / Wi-Fi while charging. Live ECG at
   the barn is not required; later options: a phone app over BLE, or Wi-Fi streaming on request.
+- **USB power-good blip at boot:** PWR_GD read low for one 250 ms poll as the RFID reader powered up,
+  which looked like a battery -> USB plug-in and powered the device off (3 orange flashes). USB loss now
+  has to last 1 s (`USB_LOSS_DEBOUNCE_MS`) before it counts.
+- **BLE controller activities:** `CONFIG_BT_CTRL_BLE_MAX_ACT` was 3; two connectable advertising sets
+  (telemetry + app) plus a connection exceed it and the telemetry bursts failed (`rc=519`). Now 8, with
+  `CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=2`.
+- **iOS caches a device's name per address** and the app uses the cached one: after a name change the
+  phone kept showing the old name. Bump `BLE_ADDR_OFFSET` so phones see a new device.
+- **No GATT client:** the central role is off, so the device can't start an MTU exchange; the app does.
+  At MTU 23 live notifications carry fewer samples (1) rather than being cut off.
 - **Gateway DB**: readings are not unique by (seq, uptime); de-dup is in memory per burst. Session
   losses are only counted within one gateway run + one device session.
 
@@ -201,6 +254,15 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
   `CONFIG_PM_PROFILING` and dump `esp_pm_dump_locks()`); MAX30001 and GPS backup current.
 - Fixes since: WS2812 frame shift after light-sleep wake (D1 stuck green until the next blink),
   and auto-stop on USB plug-in. Built, not yet flashed/verified at the time of writing.
+
+## Overnight test with SD logging (2026-11-09)
+
+- 02:44-07:34 UTC (4 h 50 min) on battery, ECG 512 Hz + IMU 416 Hz (+ mag 104 Hz) to the SD card.
+  Gateway: 581/580 readings, no gaps. IMU file: 17512 complete records, matching the file size.
+- **Battery:** 98.8 % -> 89.3 % (4175 -> 4098 mV): **1.96 %/h ≈ 28 mA** (1.83 %/h in the second half),
+  vs 0.95 %/h without logging: logging roughly doubles the drain (~2.2 days per charge). Likely: SD card
+  not dropping into its low-power idle in SPI mode, CPU wake-ups (32/s ECG + IMU FIFO), IMU in
+  high-performance mode. To be measured with the PPK2.
 
 ## Battery drain investigation (parked 2026-11-08, waiting for the PPK2)
 
@@ -220,22 +282,49 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Next steps
 
-**In progress (night of 2026-11-09):** overnight run on battery with SD logging on (ECG 512 Hz +
-IMU 416 Hz) and the PC gateway receiving. In the morning: check the gateway's battery curve (drain
-with logging on vs the ~12-14 mA baseline), each EDF file with `tools/edf_info.py` (record counts vs
-file size, no gaps), and the readings / losses in the dashboard.
-
-1. **Wi-Fi while charging:** use the provisioned networks for time sync, a backend check-in, session
-   file upload, OTA (signature-checked, with rollback) and the trusted-gateway list.
+1. **Register this board on the dev backend** as `50787DFFFE15B0B4`, then remove
+   `BLE_NAME_TEST_OVERRIDE`. Decide whether the 16-digit ID becomes the device ID everywhere (files,
+   uploads, gateway), as the VPro backend expects.
+2. **Wi-Fi while charging: file offload to the dev backend** with VPro's endpoints (below): prepare ->
+   PUT to the pre-signed URL -> process; then charging telemetry and the device event log; firmware
+   check + remote `setup` (config). Needs the dev URLs and API keys (kept out of git, like VPro's
+   `env.xh`); TLS with the certificate bundle (VPro has verification off).
+3. **BLE bond store:** `ble_store_config_write_local_irk rc=27` at boot (store capacity); pairing works
+   but check bonds survive reboots.
+4. **Web Bluetooth config page:** edit `config.json` settings and view the saved networks from a
+   browser (Chrome on Android / desktop; Bluefy on iOS).
 2. **Web Bluetooth config page:** edit `config.json` settings and view the saved networks from a
    browser (Chrome on Android / desktop; Bluefy on iOS).
-3. **Power:** the parked PPK2 drain test (SD card is the top suspect for the extra ~8 mA), plus the
+5. **Power:** the parked PPK2 drain test (SD card is the top suspect for the extra ~8 mA), plus the
    cost of logging (ECG interrupt every 31 ms, IMU FIFO reads ~30/s at 416 Hz); then shorten the 2 s
-   burst and tune TX power after the range test.
-4. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
-5. **Respiration** (MAX30001 BioZ or ECG-derived), and checking R-to-R detection on a horse ECG
+   burst and tune TX power after the range test. The app advert (every 1 s) adds a little; measure it.
+6. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
+7. **Respiration** (MAX30001 BioZ or ECG-derived; the app's respiration service is waiting for it), and checking R-to-R detection on a horse ECG
    (large T waves may need WNDW/PTSF tuning).
-6. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.
-7. Production items: SIG company ID, off-the-shelf listen-only gateway (active scan + scan
-   responses), per-device keys, AWS backend, test-lab check that +15 dBm stays within the SPRO
-   certification.
+8. Lead-off detection on the MAX30001 (status byte of the live ECG).
+9. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.
+10. Production items: SIG company ID, off-the-shelf listen-only gateway (active scan + scan
+   responses), per-device keys and BLE passkey, AWS backend, test-lab check that +15 dBm stays
+   within the SPRO certification.
+
+## VPro backend API (from the VPro platform code, 2026-11-09)
+
+Learned from `equimetrics-equi-sensordevice-platform` (IDF 5.2.1, LoRa; read only, not copied). HTTPS +
+JSON, header `x-api-key`; two base URLs and keys (`WIFI_API_DATA_URL/KEY`, `WIFI_API_FW_URL/KEY`) from a
+git-ignored `env.xh`.
+
+| Purpose | Request |
+|---|---|
+| ECG upload slot | `POST {DATA}/api/v2/ecg/prepare` `{sessionId, deviceId, horseChipNumber, fileName, startedAt, endedAt}` -> `{id, uploadUrl}` |
+| Upload | `PUT <uploadUrl>` (pre-signed, raw file bytes) |
+| ECG processing | `POST {DATA}/api/v2/ecg/{id}/process` |
+| IMU / GPS / syslog | `POST {DATA}/api/imu` -> `{id, uploadUrl}`, then PUT (no process step) |
+| Charging telemetry | `POST {DATA}/api/sessions/events/charging` (device, battery, Wi-Fi, upload progress) |
+| Device events | `POST {DATA}/api/v1/devices/{id}/events/bulk` |
+| Firmware + config | `GET {FW}/firmware?deviceId=&hwVersion=&fwVersion=` -> `{update_required, fw_url, setup}` |
+| Registration | `POST {FW}/device-provisioning?deviceName=` (LoRa EUIs, keys, BLE passkey) |
+
+Uploads run only while charging on Wi-Fi, up to 3 tries per file; a file is **deleted after a
+successful upload**. The uploader reads the session ID from the folder name and
+`prefix_device_horse_startedAtMs.ext` from the file name (`Unknown` = no chip), which is why our files
+use that naming.

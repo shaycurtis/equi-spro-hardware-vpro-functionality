@@ -25,7 +25,7 @@ static const char *TAG = "storage";
 
 static sdmmc_card_t *s_card;
 static storage_config_t s_cfg = {
-    .ecg_log = true, .ecg_rate_hz = 512,
+    .ecg_log = true, .ecg_rate_hz = 256,
     .imu_log = false, .imu_rate_hz = 104,
 };
 

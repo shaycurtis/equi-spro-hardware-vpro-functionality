@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "esp_mac.h"
 #include "psa/crypto.h"
 #include "nvs.h"
 #include "host/ble_hs.h"
@@ -13,6 +14,9 @@
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
 #include "ecg_service.h"
+#include "live_service.h"
+
+void ble_store_config_init(void);   /* NimBLE bond store in NVS (no public header) */
 
 static const char *TAG = "telemetry";
 
@@ -25,7 +29,15 @@ static bool s_adv_configured;
 static volatile int64_t s_gw_seen_us = -1;   /* last scan request from a gateway */
 static volatile uint32_t s_scan_reqs;
 
-#define ADV_INSTANCE 0
+/* Added to the chip's BT MAC (VPro adds 1, to get past iOS caching). Bump it to make phones see
+ * a new device after a name change (iOS keeps the old name per address): now 3 (spoofed ID). */
+#define BLE_ADDR_OFFSET 3
+#define ADV_INSTANCE 0       /* telemetry bursts (gateway): MSD advert + encrypted identity */
+#define APP_ADV_INSTANCE 1   /* the app: connectable, with the name the app filters on */
+#define APP_ADV_ITVL_MS 1000 /* continuous, so the app finds us any time (as VPro) */
+
+static bool s_app_adv_configured;
+static void app_adv_start(void);
 
 /*
  * Trusted gateways, learned: a central that connects and writes a command (time set, ECG,
@@ -105,6 +117,7 @@ static void on_sync(void)
     ble_hs_id_copy_addr(s_own_addr_type, a, NULL);
     ESP_LOGI(TAG, "BLE ready, address %02X:%02X:%02X:%02X:%02X:%02X", a[5], a[4], a[3], a[2], a[1], a[0]);
     s_synced = true;
+    app_adv_start();
 }
 
 static void on_reset(int reason)
@@ -239,17 +252,52 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (ev->connect.status == 0) {
-            ESP_LOGI(TAG, "gateway connected (handle %d)", ev->connect.conn_handle);
+            ESP_LOGI(TAG, "connected (handle %d)", ev->connect.conn_handle);
             ecg_service_on_connect(ev->connect.conn_handle);
+            /* As the VPro firmware: ask for a 30-60 ms interval (supervision timeout 4 s
+             * rather than VPro's 180 ms, which is very tight). */
+            struct ble_gap_upd_params up = { .itvl_min = 24, .itvl_max = 48, .latency = 0,
+                                             .supervision_timeout = 400 };
+            ble_gap_update_params(ev->connect.conn_handle, &up);
         }
         break;
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "gateway disconnected (reason 0x%x)", ev->disconnect.reason);
+        ESP_LOGI(TAG, "disconnected (handle %d, reason 0x%x)", ev->disconnect.conn.conn_handle,
+                 ev->disconnect.reason);
         ecg_service_on_disconnect(ev->disconnect.conn.conn_handle);
+        live_service_on_disconnect(ev->disconnect.conn.conn_handle);
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
         ecg_service_on_subscribe(ev->subscribe.conn_handle, ev->subscribe.attr_handle, ev->subscribe.cur_notify);
+        live_service_on_subscribe(ev->subscribe.conn_handle, ev->subscribe.attr_handle, ev->subscribe.cur_notify);
         break;
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        /* We display (DisplayOnly IO capability), the phone's user types the passkey. */
+        if (ev->passkey.params.action == BLE_SM_IOACT_DISP) {
+            struct ble_sm_io io = { .action = BLE_SM_IOACT_DISP, .passkey = TELEMETRY_BLE_PASSKEY };
+            int rc = ble_sm_inject_io(ev->passkey.conn_handle, &io);
+            ESP_LOGI(TAG, "pairing (handle %d): passkey entry%s", ev->passkey.conn_handle,
+                     rc ? " failed" : "");
+        }
+        break;
+    case BLE_GAP_EVENT_ENC_CHANGE: {
+        struct ble_gap_conn_desc d;
+        if (ble_gap_conn_find(ev->enc_change.conn_handle, &d) == 0) {
+            ESP_LOGI(TAG, "link %d: %s%s%s", ev->enc_change.conn_handle,
+                     ev->enc_change.status == 0 ? "encrypted" : "encryption failed",
+                     d.sec_state.authenticated ? ", authenticated" : "", d.sec_state.bonded ? ", bonded" : "");
+        }
+        break;
+    }
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* The phone lost its bond (e.g. "forget device") but we still have ours: drop ours
+         * and pair again. */
+        struct ble_gap_conn_desc d;
+        if (ble_gap_conn_find(ev->repeat_pairing.conn_handle, &d) == 0) {
+            ble_store_util_delete_peer(&d.peer_id_addr);
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
     case BLE_GAP_EVENT_MTU:
         ESP_LOGI(TAG, "MTU %d", ev->mtu.value);
         break;
@@ -263,14 +311,29 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
             s_scan_reqs++;
         }
         break;
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        /* The app advert stops when someone connects through it: keep it going. (The
+         * telemetry instance completes at the end of every burst, as intended.) */
+        if (ev->adv_complete.instance == APP_ADV_INSTANCE) {
+            app_adv_start();
+        }
+        break;
     default:
-        break;   /* ADV_COMPLETE at the end of each burst is expected */
+        break;
     }
     return 0;
 }
 
 esp_err_t telemetry_ble_init(const char *name)
 {
+    /* As the VPro firmware: Bluetooth address = the chip's BT MAC + 1. Its comment: a
+     * workaround for iOS caching (a new address makes iOS see a new device). esp_read_mac()
+     * returns the eFuse-derived address, so this is the same on every boot. */
+    uint8_t mac[6];
+    if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+        mac[5] += BLE_ADDR_OFFSET;
+        esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+    }
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init: %s", esp_err_to_name(err));
@@ -286,6 +349,21 @@ esp_err_t telemetry_ble_init(const char *name)
         ESP_LOGE(TAG, "ECG service register rc=%d", rc);
         return ESP_FAIL;
     }
+    rc = live_service_register();
+    if (rc != 0) {
+        ESP_LOGE(TAG, "live services register rc=%d", rc);
+        return ESP_FAIL;
+    }
+    /* Pairing for the app's live services: passkey (we display, the phone enters it), LE
+     * Secure Connections, bonded (keys in NVS). The gateway's services need no pairing. */
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 1;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ble_store_config_init();
     ble_att_set_preferred_mtu(247);
     gateways_load();
     err = fleet_key_init();
@@ -380,7 +458,7 @@ esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int 
     return ESP_OK;
 }
 
-esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint64_t horse_id)
+esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint64_t session, uint64_t horse_id)
 {
     uint8_t *r = s_rsp;
     size_t n = 0;
@@ -399,10 +477,12 @@ esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint6
     n += 4;
 
     uint8_t nonce[7] = { r[6], r[7], r[8], r[9], r[10], r[11], r[12] };   /* device_id + rnd */
-    uint8_t pt[10];
-    put32(&pt[0], session);
+    uint8_t pt[14];
+    for (int i = 0; i < 8; i++) {
+        pt[i] = (uint8_t)(session >> (8 * i));
+    }
     for (int i = 0; i < 6; i++) {
-        pt[4 + i] = (uint8_t)(horse_id >> (8 * i));
+        pt[8 + i] = (uint8_t)(horse_id >> (8 * i));
     }
     size_t out_len = 0;
     psa_status_t st = psa_aead_encrypt(s_fleet_key, CCM_ALG, nonce, sizeof(nonce), aad, 9, pt, sizeof(pt),
@@ -424,6 +504,83 @@ void telemetry_ble_stop(void)
 {
     if (s_synced && ble_gap_ext_adv_active(ADV_INSTANCE)) {
         ble_gap_ext_adv_stop(ADV_INSTANCE);
+    }
+    if (s_synced && ble_gap_ext_adv_active(APP_ADV_INSTANCE)) {
+        ble_gap_ext_adv_stop(APP_ADV_INSTANCE);
+    }
+}
+
+/* Second advertising instance for the Equimetrics app (legacy PDUs, so every phone sees it),
+ * laid out as the VPro firmware's NimBLE-cpp advert: advert = flags + Heart Rate (16-bit,
+ * complete) + Raw ECG service (128-bit, incomplete list: the other services did not fit),
+ * scan response = complete name ("EQUI_...", the app's filter). Same address as the
+ * telemetry bursts. */
+static void app_adv_start(void)
+{
+    if (!s_synced || ble_gap_ext_adv_active(APP_ADV_INSTANCE)) {
+        return;
+    }
+    int rc;
+    if (!s_app_adv_configured) {
+        struct ble_gap_ext_adv_params p = {
+            .connectable = 1,
+            .scannable = 1,
+            .legacy_pdu = 1,
+            .itvl_min = BLE_GAP_ADV_ITVL_MS(APP_ADV_ITVL_MS),
+            .itvl_max = BLE_GAP_ADV_ITVL_MS(APP_ADV_ITVL_MS),
+            .own_addr_type = s_own_addr_type,
+            .primary_phy = BLE_HCI_LE_PHY_1M,
+            .secondary_phy = BLE_HCI_LE_PHY_1M,
+            .tx_power = 127,
+        };
+        rc = ble_gap_ext_adv_configure(APP_ADV_INSTANCE, &p, NULL, gap_event, NULL);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "app adv configure rc=%d", rc);
+            return;
+        }
+        static const uint8_t adv[25] = {
+            2, BLE_HS_ADV_TYPE_FLAGS, BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
+            3, BLE_HS_ADV_TYPE_COMP_UUIDS16, 0x0D, 0x18,               /* Heart Rate 0x180D */
+            17, BLE_HS_ADV_TYPE_INCOMP_UUIDS128,                       /* 18a6e117-...-ff2015f7d6ef */
+            0xef, 0xd6, 0xf7, 0x15, 0x20, 0xff, 0x5c, 0x97, 0xc2, 0x4b, 0xf1, 0x39, 0x17, 0xe1, 0xa6, 0x18,
+        };
+        size_t n = sizeof(adv);
+        uint8_t rsp[31];
+        size_t rn = 0, len = strlen(s_name);
+        if (len > sizeof(rsp) - 2) {
+            len = sizeof(rsp) - 2;
+        }
+        rsp[rn++] = 1 + len;
+        rsp[rn++] = BLE_HS_ADV_TYPE_COMP_NAME;
+        memcpy(&rsp[rn], s_name, len);
+        rn += len;
+        struct os_mbuf *m = os_msys_get_pkthdr(n, 0);
+        struct os_mbuf *r = os_msys_get_pkthdr(rn, 0);
+        if (!m || !r || os_mbuf_append(m, adv, n) || os_mbuf_append(r, rsp, rn)) {
+            if (m) {
+                os_mbuf_free_chain(m);
+            }
+            if (r) {
+                os_mbuf_free_chain(r);
+            }
+            return;
+        }
+        rc = ble_gap_ext_adv_set_data(APP_ADV_INSTANCE, m);
+        if (rc == 0) {
+            rc = ble_gap_ext_adv_rsp_set_data(APP_ADV_INSTANCE, r);
+        } else {
+            os_mbuf_free_chain(r);
+        }
+        if (rc != 0) {
+            ESP_LOGE(TAG, "app adv data rc=%d", rc);
+            return;
+        }
+        s_app_adv_configured = true;
+        ESP_LOGI(TAG, "app advert \"%s\" every %d ms", s_name, APP_ADV_ITVL_MS);
+    }
+    rc = ble_gap_ext_adv_start(APP_ADV_INSTANCE, 0, 0);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGW(TAG, "app adv start rc=%d", rc);
     }
 }
 

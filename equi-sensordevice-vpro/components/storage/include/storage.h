@@ -5,7 +5,7 @@
  * /sdcard/config.json (created with defaults if missing; the web app will edit it later):
  *   {
  *     "version": 1,
- *     "ecg": { "log": true,  "rate_hz": 512 },     rate_hz: 256 or 512
+ *     "ecg": { "log": true,  "rate_hz": 256 },     rate_hz: 256 or 512
  *     "imu": { "log": false, "rate_hz": 104 }      rate_hz: 104 or 416 (accel + gyro);
  *   }                                              the magnetometer is logged at 104 Hz
  * Each session records the enabled channels automatically.

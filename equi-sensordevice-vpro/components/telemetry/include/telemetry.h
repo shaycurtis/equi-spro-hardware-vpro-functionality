@@ -28,18 +28,20 @@
  *  v4 = 4-byte session ID at offset 5 and everything after shifted by 3. v3 = v4 without
  *  heart_rate. v2 = v3 with battery_soc as 1 byte of whole %.
  *
- * SCAN RESPONSE - encrypted identity (23 bytes after the company ID). Only gateways that scan
+ * SCAN RESPONSE - encrypted identity (27 bytes after the company ID; the whole 31-byte scan
+ * response is this one field). Only gateways that scan
  * actively receive it; they forward it as opaque bytes and only Equimetrics software holding
  * the fleet key can read it (HorseID is never sent in the clear):
  *    0   1  magic        0xE9
- *    1   1  type         0x82 (encrypted identity, v2)
+ *    1   1  type         0x83 (encrypted identity, v3)
  *    2   3  device_id    BIG-endian (clear)
  *    5   4  nonce        random, new whenever the identity changes (clear)
- *    9  10  ciphertext   AES-128-CCM of: session ID (4, LE; Unix time the session started,
- *                        bit 31 = random because the RTC had no time) + horse_id (6, LE; ISO
- *                        11784 country << 38 | national ID, 0 = no tag)
- *   19   4  tag          CCM authentication tag (4 bytes)
+ *    9  14  ciphertext   AES-128-CCM of: session ID (8, LE; Unix time in ms the session
+ *                        started, bit 52 = random because the RTC had no time) + horse_id (6,
+ *                        LE; ISO 11784 country << 38 | national ID, 0 = no tag)
+ *   23   4  tag          CCM authentication tag (4 bytes)
  *   CCM: key = fleet key (16 bytes), nonce = device_id (3) + nonce (4), AAD = bytes 0..8.
+ *  v2 (0x82, older firmware) = v3 with a 4-byte session ID in seconds (bit 31 = random).
  *  v1 (0x81, older firmware) had session + horse_id in the clear plus the device name.
  */
 #include <stddef.h>
@@ -50,8 +52,25 @@
 #define TELEMETRY_MAGIC        0xE9
 #define TELEMETRY_VERSION      5
 #define TELEMETRY_PAYLOAD_LEN  20
-#define TELEMETRY_IDENTITY     0x82
-#define TELEMETRY_IDENTITY_LEN 23
+#define TELEMETRY_IDENTITY     0x83
+#define TELEMETRY_IDENTITY_LEN 27
+
+/*
+ * Recordings the app starts with the ECG control service. start: ESP_OK = a file is being
+ * written; ESP_ERR_NOT_SUPPORTED = the session already records ECG continuously (live view
+ * only, no separate file); anything else = could not record (reported to the app as an
+ * error). stop: keep = save the file, false = delete it ("discard"). Both are called from
+ * NimBLE / timer context and must not block.
+ */
+typedef esp_err_t (*telemetry_rec_start_fn)(uint64_t recording_id, uint32_t seconds);
+typedef void (*telemetry_rec_stop_fn)(bool keep);
+void telemetry_set_recording_hooks(telemetry_rec_start_fn start, telemetry_rec_stop_fn stop);
+
+/* BLE pairing passkey for the app's live services. Fixed for development; to be generated per
+ * device at provisioning once the backend is connected. */
+#define TELEMETRY_BLE_PASSKEY  111111
+
+#define SESSION_RANDOM_BIT     (1ULL << 52)   /* session ID is random (RTC had no time); < 2^53 so JavaScript keeps it exact */
 
 #define TELEM_FLAG_USB         (1u << 0)
 #define TELEM_FLAG_CHARGING    (1u << 1)
@@ -76,7 +95,7 @@ typedef struct {
 
 void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN]);
 
-/* BLE: start NimBLE (device name e.g. "EQ-15B0B4"). Non-blocking. */
+/* BLE: start NimBLE (device name e.g. "EQUI_15B0B4"). Non-blocking. */
 esp_err_t telemetry_ble_init(const char *name);
 
 /* Advertise `payload` for `duration_ms` at a 100 ms interval, replacing any burst in progress. */
@@ -84,7 +103,7 @@ esp_err_t telemetry_ble_burst(const uint8_t payload[TELEMETRY_PAYLOAD_LEN], int 
 
 /* Set the encrypted identity scan response (call at start-up and whenever the session / horse
  * changes). */
-esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint32_t session, uint64_t horse_id);
+esp_err_t telemetry_ble_set_identity(uint32_t device_id, uint64_t session, uint64_t horse_id);
 
 /* Stop advertising (shutdown). */
 void telemetry_ble_stop(void);

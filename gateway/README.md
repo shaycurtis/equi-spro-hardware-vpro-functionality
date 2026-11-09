@@ -27,7 +27,7 @@ estimate** in mA and runtime), a **Sessions** strip
 **ECG on demand** panel (needs `--serial`; the device is contacted at its next advert, up to 30 s).
 
 Files:
-- `equi_protocol.py`: advert decoder (telemetry v1-v4 + identity), mirrors `components/telemetry/include/telemetry.h`.
+- `equi_protocol.py`: advert decoder (telemetry v1-v5 + identity v1-v3), mirrors `components/telemetry/include/telemetry.h`.
 - `gateway.py`: receiver loop, de-duplication, SQLite, sessions, automatic device time sync.
 - `ecg_manager.py`: on-demand ECG via the receiver (request, reassembly, storage).
 - `webapp.py`: JSON API + `static/index.html`.
@@ -58,5 +58,13 @@ Readings heard before the identity are stored with `session_tag` and no `device_
 attached when the identity arrives (within 24 h).
 
 Since 2026-11-09 a device session starts at the tag scan (or the scan-button override, HorseID
-"unknown"), not at boot. Until then the device advertises with session tag 0 and no identity, so
+"Unknown"), not at boot. Until then the device advertises with session tag 0 and no identity, so
 those readings stay without a session; that is expected (the device is on but not on a horse yet).
+
+Session IDs are **Unix time in milliseconds** since 2026-11-09 (as the VPro platform), carried in
+identity **v3** (0x83, 8-byte session, random IDs flagged by bit 52 so the dashboard's JavaScript
+keeps them exact). Older firmware sent seconds (identity v2, bit 31 = random); both are read, and
+`session_start()` / `session_is_random()` in `equi_protocol.py` handle either.
+
+The device also runs a second, connectable advert for the Equimetrics app (name only, no
+manufacturer data); the gateway ignores it.

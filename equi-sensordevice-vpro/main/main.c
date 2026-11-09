@@ -10,9 +10,11 @@
  * pressed during the wait (no tag: HorseID unknown). SD recording starts with the session.
  * Later, a short SW1 press scans again; a different horse starts a new session.
  */
+#include <string.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -39,7 +41,7 @@
 #define RFID_TIMEOUT_S   120    /* how long to wait for a tag (no session starts without one or the override) */
 
 static uint32_t s_dev_id;
-static volatile uint32_t s_session;
+static volatile uint64_t s_session;   /* Unix time in ms (as VPro), 0 = no session yet */
 static volatile uint64_t s_horse;      /* ISO 11784 packed, 0 = none */
 static volatile bool s_scanning;
 
@@ -47,6 +49,11 @@ static const char *TAG = "main";
 
 /* Temporary bring-up check: 3 s capture of the MAX30001 internal 1 Hz test signal at boot. */
 #define ECG_BOOT_SELFTEST 0
+/* TEMPORARY, development only: the Equimetrics app only connects to device IDs registered in
+ * the backend, and this board (EQUI_50787DFFFE15B0B4) is not yet. Until it is, advertise a
+ * registered VPro's ID so the app can be tested. Bluetooth name only: files, gateway and
+ * identity keep our own ID. Remove (and bump BLE_ADDR_OFFSET) once this board is registered. */
+#define BLE_NAME_TEST_OVERRIDE "EQUI_AC1F09FFFE0A9904"
 #define SD_BOOT_SPEEDTEST 0   /* bring-up: 1 MB write/read test on the SD card at boot */
 
 #if ECG_BOOT_SELFTEST
@@ -117,13 +124,15 @@ static uint32_t now_epoch(void)
     return sensors_get_epoch(&epoch) == ESP_OK ? epoch : 0;   /* 0 = RTC has no time */
 }
 
-static uint32_t new_session_id(void)
+/* Session ID = Unix time in milliseconds, as the VPro platform uses (the RTC has 1 s
+ * resolution, so the last three digits are 000). */
+static uint64_t new_session_id(void)
 {
     uint32_t epoch = now_epoch();
     if (epoch) {
-        return epoch & 0x7FFFFFFF;
+        return (uint64_t)epoch * 1000u;
     }
-    return esp_random() | 0x80000000u;   /* RTC has no time: random, flagged by bit 31 */
+    return SESSION_RANDOM_BIT | esp_random();   /* RTC has no time: random, flagged by bit 52 */
 }
 
 static volatile int64_t s_identity_at_us;   /* when the current identity was published */
@@ -182,15 +191,48 @@ static void show_running_leds(void)
 
 static volatile bool s_override;   /* scan button pressed while waiting for a tag */
 
+static char s_horse_str[16];   /* chip number of the current session, "" = none / unknown */
+
+/* App-started recording (ECG control service). With continuous ECG on and a session running,
+ * the session file already has it: live view only. Otherwise its own file, in the session's
+ * folder (or one named after the recording if there is no session yet). */
+static esp_err_t app_rec_start(uint64_t id, uint32_t seconds)
+{
+    const storage_config_t *cfg = storage_config();
+    if (cfg->ecg_log && s_session) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    recorder_clip_cfg_t c = {
+        .device_id = s_dev_id,
+        .session = s_session ? s_session : id,
+        .id = id,
+        .epoch = id > 1000000000000ULL ? (uint32_t)(id / 1000) : now_epoch(),
+        .horse = s_session && s_horse_str[0] ? s_horse_str : NULL,
+        .rate_hz = cfg->ecg_rate_hz,
+    };
+    esp_err_t err = recorder_clip_start(&c);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "app recording %llu started (%lu s, 0 = until stopped)", (unsigned long long)id,
+                 (unsigned long)seconds);
+    }
+    return err;
+}
+
+static void app_rec_stop(bool keep)
+{
+    recorder_clip_stop(keep);
+}
+
 /* Start a session (tag read, or the scan-button override with horse == NULL). */
 static void start_session(uint64_t packed, const char *horse)
 {
+    strlcpy(s_horse_str, horse ? horse : "", sizeof(s_horse_str));
     bool first = s_session == 0;
     uint32_t epoch = now_epoch();
     s_session = new_session_id();
     s_horse = packed;
-    ESP_LOGI(TAG, "session %lu started, HorseID %s%s", (unsigned long)s_session, horse ? horse : "unknown",
-             (s_session & 0x80000000u) ? " (random ID: RTC not set)" : "");
+    ESP_LOGI(TAG, "session %llu started, HorseID %s%s", (unsigned long long)s_session, horse ? horse : "Unknown",
+             (s_session & SESSION_RANDOM_BIT) ? " (random ID: RTC not set)" : "");
     publish_identity();
     const storage_config_t *cfg = storage_config();
     if (storage_mounted() && (cfg->ecg_log || cfg->imu_log)) {
@@ -218,13 +260,13 @@ static void on_tag(const rfid_tag_t *tag, void *ctx)
         if (!s_session || packed != s_horse) {
             start_session(packed, str);          /* first tag, or a different horse */
         } else {
-            ESP_LOGI(TAG, "same horse %s: session %lu continues", str, (unsigned long)s_session);
+            ESP_LOGI(TAG, "same horse %s: session %llu continues", str, (unsigned long long)s_session);
         }
     } else if (s_override) {
         if (!s_session) {
             start_session(0, NULL);              /* no tag available: HorseID unknown */
         } else {
-            ESP_LOGI(TAG, "scan cancelled: session %lu continues", (unsigned long)s_session);
+            ESP_LOGI(TAG, "scan cancelled: session %llu continues", (unsigned long long)s_session);
         }
     } else {
         ESP_LOGW(TAG, "no tag scanned%s", s_session ? "; session continues" :
@@ -310,7 +352,7 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
     power_charge_t c = power_charge_state();
     *t = (telemetry_t){
         .device_id = s_dev_id,
-        .session = s_session,
+        .session = (uint32_t)s_session,   /* only the low byte is sent */
         .seq = seq,
         .flags = (c != POWER_CHARGE_NO_USB ? TELEM_FLAG_USB : 0) |
                  (c == POWER_CHARGE_CHARGING ? TELEM_FLAG_CHARGING : 0) |
@@ -415,8 +457,19 @@ void app_main(void)
     power_register_shutdown_cb(recorder_shutdown);
 
     char name[24];
-    snprintf(name, sizeof(name), "EQ-%s", device_id_get());
+    /* The Equimetrics app only lists "EQUI_" + a 16-hex-digit ID (VPro boards use their LoRa
+     * module's EUI-64). We form the EUI-64 from the factory MAC the standard way (FFFE in the
+     * middle), e.g. 50:78:7D:15:B0:B4 -> EQUI_50787DFFFE15B0B4; it still ends in our ID. */
+#ifdef BLE_NAME_TEST_OVERRIDE
+    strlcpy(name, BLE_NAME_TEST_OVERRIDE, sizeof(name));
+#else
+    uint8_t mac[6] = { 0 };
+    esp_efuse_mac_get_default(mac);
+    snprintf(name, sizeof(name), "EQUI_%02X%02X%02XFFFE%02X%02X%02X", mac[0], mac[1], mac[2], mac[3],
+             mac[4], mac[5]);
+#endif
     ESP_ERROR_CHECK(telemetry_ble_init(name));   /* identity is published when the session starts */
+    telemetry_set_recording_hooks(app_rec_start, app_rec_stop);
     power_register_shutdown_cb(telemetry_ble_stop);
     power_register_shutdown_cb(ecg_shutdown);
     ESP_ERROR_CHECK(ecg_init());           /* continuous heart rate from the MAX30001 */

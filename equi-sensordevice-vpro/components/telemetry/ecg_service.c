@@ -190,8 +190,7 @@ int ecg_service_register(void)
 
 void ecg_service_on_connect(uint16_t conn)
 {
-    s_conn = conn;
-    s_notify = false;
+    (void)conn;   /* the gateway is whoever subscribes to Data (a phone may be connected too) */
 }
 
 void ecg_service_on_disconnect(uint16_t conn)
@@ -208,7 +207,13 @@ void ecg_service_on_disconnect(uint16_t conn)
 
 void ecg_service_on_subscribe(uint16_t conn, uint16_t attr, bool notify_on)
 {
-    if (attr == s_data_handle && conn == s_conn) {
-        s_notify = notify_on;
+    if (attr != s_data_handle) {
+        return;
+    }
+    if (notify_on) {
+        s_conn = conn;
+        s_notify = true;
+    } else if (conn == s_conn) {
+        s_notify = false;
     }
 }

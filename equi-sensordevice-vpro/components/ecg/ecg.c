@@ -49,9 +49,13 @@ static volatile bool s_task_done;
 static ecg_request_t s_req;
 
 /* stream (continuous) mode */
-static volatile uint16_t s_stream_rate;          /* requested rate, 0 = off */
-static ecg_stream_cb_t s_stream_cb;
+static volatile uint16_t s_stream_rate;          /* running rate, 0 = off (SD stream or live tap) */
+static volatile uint16_t s_rec_rate;             /* rate the SD stream asked for, 0 = none */
+static ecg_stream_cb_t volatile s_stream_cb;
 static void *s_stream_ctx;
+static ecg_live_cb_t volatile s_live_cb;
+static void *s_live_ctx;
+static uint32_t s_live_phase;                    /* decimation phase at 512 sps */
 static volatile bool s_stream_changed;
 static bool s_irq_ok = true;                     /* INTB usable */
 static bool s_isr_added;
@@ -138,12 +142,14 @@ void ecg_hr_get(uint32_t window_s, uint8_t *bpm, uint8_t *beats)
     *bpm = (uint8_t)(b > 255 ? 255 : b);
 }
 
-static void poll_rr(void)
+static uint32_t poll_rr(void)
 {
     uint32_t rr;
     if (max30001_rtor_poll(&rr)) {
         record_rr(rr);
+        return rr;
     }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ capture */
@@ -267,8 +273,10 @@ static void stream_service(void)
 {
     int32_t raw[32];
     int16_t v[32];
+    int32_t live[32];
     size_t got = 0;
     s_st.wakes++;
+    uint32_t rr = poll_rr();
     for (int pass = 0; pass < 3; pass++) {
         bool ovf;
         size_t n = max30001_ecg_read(raw, 32, &ovf);
@@ -285,8 +293,22 @@ static void stream_service(void)
             v[i] = to16(raw[i]);
         }
         got += n;
-        if (s_stream_cb) {
-            s_stream_cb(v, n, s_stream_ctx);
+        ecg_stream_cb_t cb = s_stream_cb;
+        if (cb) {
+            cb(v, n, s_stream_ctx);
+        }
+        ecg_live_cb_t lcb = s_live_cb;
+        if (lcb) {
+            size_t m = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (s_stream_rate == ECG_LIVE_RATE_HZ || (s_live_phase++ & 1) == 0) {
+                    live[m++] = raw[i];
+                }
+            }
+            if (m) {
+                lcb(live, m, (uint16_t)(rr > 0xffff ? 0 : rr), s_live_ctx);
+                rr = 0;
+            }
         }
         if (s_busy && !s_cap.active) {
             capture_begin();
@@ -299,7 +321,6 @@ static void stream_service(void)
         }
     }
     s_st.samples += got;
-    poll_rr();
 
     /* INTB stuck low (e.g. its 1.8 V high level not read as high): fall back to polling. */
     if (s_irq_ok) {
@@ -451,28 +472,56 @@ bool ecg_busy(void)
     return s_busy;
 }
 
+/* Run the stream at the SD stream's rate, or 512 sps for the live tap alone, or not at all.
+ * The AFE is only reconfigured when that rate changes. */
+static void update_rate(bool force)
+{
+    uint16_t want = s_rec_rate ? s_rec_rate : (s_live_cb ? ECG_RATE_HZ : 0);
+    if (want == s_stream_rate && !force) {
+        return;
+    }
+    s_stream_rate = want;
+    s_stream_changed = true;
+    if (s_task && !s_task_done) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
 esp_err_t ecg_stream_start(uint16_t rate_hz, ecg_stream_cb_t cb, void *ctx)
 {
     if ((rate_hz != 512 && rate_hz != 256) || !cb) {
         return ESP_ERR_INVALID_ARG;
     }
-    s_stream_cb = cb;
     s_stream_ctx = ctx;
-    s_stream_rate = rate_hz;
-    s_stream_changed = true;
-    if (s_task && !s_task_done) {
-        xTaskNotifyGive(s_task);
-    }
+    s_stream_cb = cb;
+    s_rec_rate = rate_hz;
+    update_rate(true);
     return ESP_OK;
 }
 
 void ecg_stream_stop(void)
 {
-    s_stream_rate = 0;
-    s_stream_changed = true;
-    if (s_task && !s_task_done) {
-        xTaskNotifyGive(s_task);
+    s_stream_cb = NULL;
+    s_rec_rate = 0;
+    update_rate(true);
+}
+
+esp_err_t ecg_live_start(ecg_live_cb_t cb, void *ctx)
+{
+    if (!cb) {
+        return ESP_ERR_INVALID_ARG;
     }
+    s_live_ctx = ctx;
+    s_live_phase = 0;
+    s_live_cb = cb;
+    update_rate(false);
+    return ESP_OK;
+}
+
+void ecg_live_stop(void)
+{
+    s_live_cb = NULL;
+    update_rate(false);
 }
 
 void ecg_shutdown(void)

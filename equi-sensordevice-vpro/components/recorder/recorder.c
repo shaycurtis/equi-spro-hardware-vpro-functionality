@@ -48,13 +48,18 @@ typedef struct {
     volatile bool ready;                    /* buffers allocated: producer may push */
     bool started;                           /* first sample received (aligned to s_t0) */
     FILE *f;
+    char path[112];
+    int16_t *chunk;                         /* staging buffer for fwrite (one per writer task) */
+    int64_t t0;                             /* esp_timer time of sample 0 */
     uint32_t records;
     volatile uint32_t dropped;
     bool starving;                          /* warned about a signal that stopped */
 } stream_t;
 
 typedef struct {
-    uint32_t session;
+    uint64_t session;                       /* folder */
+    uint64_t file_id;                       /* last field of the file name (session start, or
+                                             * an app recording's start time), ms */
     uint32_t epoch;
     char horse[16];
 } meta_t;
@@ -83,8 +88,8 @@ static void sig_push(stream_t *st, sig_t *s, const int16_t *v, size_t n, size_t 
     }
     uint32_t head = s->head;
     uint32_t pad = 0;
-    if (head == 0 && first_us > s_t0) {
-        pad = (uint32_t)lroundf((first_us - s_t0) / 1e6f * s->rate);
+    if (head == 0 && first_us > st->t0) {
+        pad = (uint32_t)lroundf((first_us - st->t0) / 1e6f * s->rate);
     }
     uint32_t tail = __atomic_load_n(&s->tail, __ATOMIC_ACQUIRE);
     if (head - tail + pad + n > s->ring_len) {
@@ -104,7 +109,7 @@ static void sig_push(stream_t *st, sig_t *s, const int16_t *v, size_t n, size_t 
 
 static void ecg_push(const int16_t *v, size_t n, void *ctx)
 {
-    stream_t *st = &s_ecg;
+    stream_t *st = ctx;   /* the session's ECG file, or an app recording */
     if (!st->ready) {
         return;
     }
@@ -157,10 +162,10 @@ static void write_header(stream_t *st, const meta_t *m)
     char buf[96];
     memset(h, ' ', len);
     field(h + 0, 8, "0");
-    snprintf(buf, sizeof(buf), "HorseID %s", m->horse[0] ? m->horse : "unknown");
+    snprintf(buf, sizeof(buf), "%s", m->horse[0] ? m->horse : "Unknown");   /* patient = chip number */
     field(h + 8, 80, buf);
-    snprintf(buf, sizeof(buf), "Device EQ-%06lX Session %lu VPro", (unsigned long)s_dev_id,
-             (unsigned long)m->session);
+    snprintf(buf, sizeof(buf), "Device EQUI_%06lX Session %llu VPro", (unsigned long)s_dev_id,
+             (unsigned long long)m->session);
     field(h + 88, 80, buf);
     struct tm t = { .tm_mday = 1, .tm_mon = 0, .tm_year = 85 };   /* EDF "unknown": 01.01.85 */
     if (m->epoch) {
@@ -207,12 +212,12 @@ static void write_header(stream_t *st, const meta_t *m)
 
 static void open_file(stream_t *st, const meta_t *m)
 {
-    char path[112];
+    char *path = st->path;
     mkdir(STORAGE_MOUNT "/sessions", 0777);                       /* EEXIST is fine */
-    int n = snprintf(path, sizeof(path), STORAGE_MOUNT "/sessions/%lu", (unsigned long)m->session);
+    int n = snprintf(path, sizeof(st->path), STORAGE_MOUNT "/sessions/%llu", (unsigned long long)m->session);
     mkdir(path, 0777);
-    snprintf(path + n, sizeof(path) - n, "/%s_%06lX_%s_%lu.edf", st->type, (unsigned long)s_dev_id,
-             m->horse[0] ? m->horse : "unknown", (unsigned long)m->session);
+    snprintf(path + n, sizeof(st->path) - n, "/%s_%06lX_%s_%llu.edf", st->type, (unsigned long)s_dev_id,
+             m->horse[0] ? m->horse : "Unknown", (unsigned long long)m->file_id);
     st->f = fopen(path, "wb");
     if (!st->f) {
         ESP_LOGE(TAG, "cannot create %s", path);
@@ -262,11 +267,11 @@ static void write_sig(stream_t *st, sig_t *s, uint32_t count, uint32_t limit)
             if (i < used) {
                 s->last = s->ring[(s->tail + i) % s->ring_len];
             }
-            s_chunk[i] = s->last;
+            st->chunk[i] = s->last;
         }
         __atomic_store_n(&s->tail, s->tail + used, __ATOMIC_RELEASE);
         if (st->f) {
-            fwrite(s_chunk, sizeof(int16_t), n, st->f);   /* little-endian, as EDF wants */
+            fwrite(st->chunk, sizeof(int16_t), n, st->f);   /* little-endian, as EDF wants */
         }
         count -= n;
     }
@@ -389,12 +394,12 @@ static sig_t mk_sig(const char *label, const char *transducer, const char *dim, 
                     .phys_max = pmax, .prefilter = prefilter, .spr = spr, .rate = rate };
 }
 
-static esp_err_t setup_ecg(uint16_t rate)
+static esp_err_t setup_ecg(stream_t *st, uint16_t rate)
 {
-    stream_t *st = &s_ecg;
     *st = (stream_t){ .type = "ecg", .nsig = 1 };
-    /* int16 = 18-bit sample >> 2: 0.3814697265625 uV/LSB, so -32768..32767 = -12500..12499.62 uV */
-    st->sig[0] = mk_sig("ECG", "Electrodes (MAX30001, gain 80)", "uV", "-12500", "12499.62",
+    /* int16 = 18-bit sample >> 2: 0.3814697265625 uV/LSB, so -32768..32767 = -12.5..12.49962 mV
+     * (mV as the VPro platform's ECG files, which its backend processing reads) */
+    st->sig[0] = mk_sig("ECG", "Electrodes (MAX30001, gain 80)", "mV", "-12.5", "12.49962",
                           "HP:0.5Hz LP:40Hz", rate, rate);
     strlcpy(st->duration, "1", sizeof(st->duration));
     return sig_alloc(&st->sig[0]);
@@ -455,10 +460,17 @@ esp_err_t recorder_start(const recorder_cfg_t *cfg)
     if (!s_lock || !s_chunk) {
         return ESP_ERR_NO_MEM;
     }
-    s_cur = (meta_t){ .session = cfg->session, .epoch = cfg->epoch };
+    s_cur = (meta_t){ .session = cfg->session, .file_id = cfg->session, .epoch = cfg->epoch };
     set_horse(&s_cur, cfg->horse);
 
-    if (cfg->ecg_rate_hz && setup_ecg(cfg->ecg_rate_hz) == ESP_OK) {
+    if (cfg->ecg_rate_hz && recorder_clip_active()) {
+        ESP_LOGI(TAG, "session ECG file takes over the ECG: saving the app recording");
+        recorder_clip_stop(true);
+        for (int i = 0; i < 60 && recorder_clip_active(); i++) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    if (cfg->ecg_rate_hz && setup_ecg(&s_ecg, cfg->ecg_rate_hz) == ESP_OK) {
         s_streams[s_nstreams++] = &s_ecg;
     }
     if (cfg->imu_rate_hz) {
@@ -477,6 +489,8 @@ esp_err_t recorder_start(const recorder_cfg_t *cfg)
         }
     }
     for (int k = 0; k < s_nstreams; k++) {
+        s_streams[k]->chunk = s_chunk;
+        s_streams[k]->t0 = s_t0;
         open_file(s_streams[k], &s_cur);
         s_streams[k]->ready = true;
     }
@@ -484,12 +498,12 @@ esp_err_t recorder_start(const recorder_cfg_t *cfg)
         return ESP_ERR_NO_MEM;
     }
     if (s_ecg.ready) {
-        ecg_stream_start(cfg->ecg_rate_hz, ecg_push, NULL);
+        ecg_stream_start(cfg->ecg_rate_hz, ecg_push, &s_ecg);
     }
     return ESP_OK;
 }
 
-void recorder_new_session(uint32_t session, uint32_t epoch, const char *horse)
+void recorder_new_session(uint64_t session, uint32_t epoch, const char *horse)
 {
     if (!s_task) {
         return;
@@ -506,7 +520,7 @@ void recorder_new_session(uint32_t session, uint32_t epoch, const char *horse)
             s->switch_at = head + (head && dt > 0 ? (uint32_t)lroundf(dt / 1e6f * s->rate) : 0);
         }
     }
-    s_next = (meta_t){ .session = session, .epoch = epoch };
+    s_next = (meta_t){ .session = session, .file_id = session, .epoch = epoch };
     set_horse(&s_next, horse);
     s_switch_pending = true;
     xSemaphoreGive(s_lock);
@@ -515,6 +529,12 @@ void recorder_new_session(uint32_t session, uint32_t epoch, const char *horse)
 
 void recorder_shutdown(void)
 {
+    if (recorder_clip_active()) {
+        recorder_clip_stop(true);   /* power-off saves an app recording, as stop would */
+        for (int i = 0; i < 80 && recorder_clip_active(); i++) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
     if (!s_task) {
         return;
     }
@@ -528,4 +548,118 @@ void recorder_shutdown(void)
     if (!s_closed) {
         ESP_LOGW(TAG, "files not closed in time");
     }
+}
+
+/* ------------------------------------------------- app-started recordings */
+
+/*
+ * One ECG file per recording the app starts (ECG control service), when the session is not
+ * already recording ECG continuously. Its own stream, buffer and writer task, so it works with
+ * or without a session recording (e.g. IMU only).
+ */
+#define CLIP_FLUSH_MS 5000
+
+static stream_t s_clip;
+static TaskHandle_t volatile s_clip_task;
+static volatile bool s_clip_stop, s_clip_keep;
+
+static void clip_task(void *arg)
+{
+    stream_t *st = &s_clip;
+    uint32_t lim[1];
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CLIP_FLUSH_MS));
+        bool stop = s_clip_stop;
+        if (stop) {
+            vTaskDelay(pdMS_TO_TICKS(50));   /* let a push already under way finish */
+        }
+        lim[0] = __atomic_load_n(&st->sig[0].head, __ATOMIC_ACQUIRE);
+        write_records(st, lim, stop);
+        if (!stop) {
+            sync_file(st);
+            continue;
+        }
+        close_file(st);
+        if (!s_clip_keep) {
+            unlink(st->path);
+            char *slash = strrchr(st->path, '/');
+            if (slash) {
+                *slash = 0;
+                rmdir(st->path);   /* only if the folder is now empty */
+            }
+            ESP_LOGI(TAG, "app recording discarded");
+        }
+        if (st->dropped) {
+            ESP_LOGW(TAG, "app recording: %lu samples dropped", (unsigned long)st->dropped);
+        }
+        break;
+    }
+    free(st->sig[0].ring);
+    free(st->chunk);
+    st->sig[0].ring = NULL;
+    st->chunk = NULL;
+    s_clip_task = NULL;
+    vTaskDelete(NULL);
+}
+
+bool recorder_clip_active(void)
+{
+    return s_clip_task != NULL;
+}
+
+esp_err_t recorder_clip_start(const recorder_clip_cfg_t *c)
+{
+    if (!storage_mounted()) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (s_clip_task || s_ecg.ready) {
+        return ESP_ERR_INVALID_STATE;   /* one at a time; or the session file has the ECG */
+    }
+    if (setup_ecg(&s_clip, c->rate_hz) != ESP_OK) {
+        return ESP_ERR_NO_MEM;
+    }
+    s_clip.chunk = heap_caps_malloc(CHUNK_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!s_clip.chunk) {
+        free(s_clip.sig[0].ring);
+        return ESP_ERR_NO_MEM;
+    }
+    s_dev_id = c->device_id;
+    meta_t m = { .session = c->session, .file_id = c->id, .epoch = c->epoch };
+    set_horse(&m, c->horse);
+    s_clip.t0 = esp_timer_get_time();
+    open_file(&s_clip, &m);
+    if (!s_clip.f) {
+        free(s_clip.sig[0].ring);
+        free(s_clip.chunk);
+        return ESP_FAIL;
+    }
+    s_clip_stop = false;
+    s_clip_keep = true;
+    s_clip.ready = true;
+    TaskHandle_t t;
+    if (xTaskCreate(clip_task, "ecg_clip", 4096, NULL, 2, &t) != pdPASS) {
+        fclose(s_clip.f);
+        s_clip.f = NULL;
+        unlink(s_clip.path);
+        free(s_clip.sig[0].ring);
+        free(s_clip.chunk);
+        s_clip.ready = false;
+        return ESP_ERR_NO_MEM;
+    }
+    s_clip_task = t;
+    ecg_stream_start(c->rate_hz, ecg_push, &s_clip);
+    return ESP_OK;
+}
+
+void recorder_clip_stop(bool keep)
+{
+    TaskHandle_t t = s_clip_task;
+    if (!t || s_clip_stop) {
+        return;
+    }
+    ecg_stream_stop();
+    s_clip.ready = false;
+    s_clip_keep = keep;
+    s_clip_stop = true;
+    xTaskNotifyGive(t);
 }
