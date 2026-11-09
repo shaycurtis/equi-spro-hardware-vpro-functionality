@@ -370,6 +370,7 @@ static void sleep_pins_setup(void)
         BOARD_PIN_LED,       /* WS2812 data stays low */
         BOARD_PIN_PWR_BTN,   /* keeps its pull-down */
         BOARD_PIN_SCAN_BTN,
+        BOARD_PIN_SD_CS,     /* SD chip select stays high (deselected) while asleep */
     };
     for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++) {
         gpio_sleep_sel_dis(keep[i]);

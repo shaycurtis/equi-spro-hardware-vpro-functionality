@@ -26,6 +26,7 @@
 #include "board.h"
 #include "power.h"
 #include "provisioning.h"
+#include "storage.h"
 #include "rfid.h"
 #include "sensors.h"
 #include "status_led.h"
@@ -44,6 +45,7 @@ static const char *TAG = "main";
 
 /* Temporary bring-up check: 3 s capture of the MAX30001 internal 1 Hz test signal at boot. */
 #define ECG_BOOT_SELFTEST 0
+#define SD_BOOT_SPEEDTEST 0   /* bring-up: 1 MB write/read test on the SD card at boot */
 
 #if ECG_BOOT_SELFTEST
 static void selftest_block(const int16_t *s, size_t n, uint32_t first, void *ctx)
@@ -353,6 +355,12 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(sensors_init());
     power_register_shutdown_cb(sensors_shutdown);
+    if (storage_init() == ESP_OK) {        /* SD card + config.json */
+        power_register_shutdown_cb(storage_shutdown);
+#if SD_BOOT_SPEEDTEST
+        storage_speed_test();
+#endif
+    }
 
     s_session = new_session_id();
     ESP_LOGI(TAG, "session %lu%s", (unsigned long)s_session, (s_session & 0x80000000u) ? " (random: RTC not set)" : "");
