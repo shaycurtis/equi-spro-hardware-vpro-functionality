@@ -309,7 +309,10 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 7. **Respiration** (MAX30001 BioZ or ECG-derived; the app's respiration service and the
    backend's `respiration` field, now a placeholder, are waiting for it), posture for `position`, and checking R-to-R detection on a horse ECG
    (large T waves may need WNDW/PTSF tuning).
-8. Lead-off detection on the MAX30001 (status byte of the live ECG).
+8. Lead-off detection on the MAX30001 (status byte of the live ECG). **On hold (user decision,
+   2026-11-10):** with the electrodes unattached the R-to-R detector reports noise as ~130 bpm (soak
+   test), which reaches the backend; accepted for now. VPro's DC lead-off (100 nA, +/-300 mV, 25 MOhm
+   bias) has wrongly reported leads off on a horse before, so it is not a quick fix.
 9. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.
 10. Production items: SIG company ID, off-the-shelf listen-only gateway (active scan + scan
    responses), per-device keys and BLE passkey, AWS backend, test-lab check that +15 dBm stays
