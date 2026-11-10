@@ -315,8 +315,10 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 2. **Wi-Fi while charging, next:** ECG upload works (check the recording appears in the app); then
    the upload progress in the charging report (`fileProgress`), the device event log, firmware check
    + remote `setup` (config). Reflash 15B0B4 for the 16-digit ID.
-3. **BLE bond store:** `ble_store_config_write_local_irk rc=27` at boot (store capacity); pairing works
-   but check bonds survive reboots.
+3. ~~BLE bond store~~ **fixed 2026-11-10:** `ble_store_config_write_local_irk rc=27` was NimBLE's
+   single local-IRK slot holding the IRK of an old BLE address (after a `BLE_ADDR_OFFSET` change).
+   `telemetry_ble_init` now deletes local IRKs of other addresses before the host starts; bonds
+   are kept (verified: reconnects without a passkey across reboots).
 4. **Web Bluetooth config page:** edit `config.json` settings and view the saved networks from a
    browser (Chrome on Android / desktop; Bluefy on iOS).
 5. **Power:** the parked PPK2 drain test (SD card is the top suspect for the extra ~8 mA), plus the

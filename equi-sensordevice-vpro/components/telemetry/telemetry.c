@@ -325,13 +325,54 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
     return 0;
 }
 
+/*
+ * NimBLE keeps one local IRK in NVS, filed under the public (identity) address. After the
+ * address changes (a BLE_ADDR_OFFSET bump, or the SPro firmware's own address) the old entry
+ * fills the only slot, so the new one cannot be saved: "ble_store_config_write_local_irk rc=27"
+ * (BLE_HS_ESTORE_CAP) at every boot and a fresh IRK each time. Drop entries for other addresses
+ * before the host starts; bonds (peer keys) are left alone.
+ */
+#define STALE_IRK_MAX 4
+
+typedef struct {
+    ble_addr_t ours;
+    ble_addr_t stale[STALE_IRK_MAX];
+    int n;
+} irk_scan_t;
+
+static int irk_scan(int obj_type, union ble_store_value *v, void *arg)
+{
+    irk_scan_t *s = arg;
+    if (memcmp(v->local_irk.addr.val, s->ours.val, sizeof(s->ours.val)) != 0 && s->n < STALE_IRK_MAX) {
+        s->stale[s->n++] = v->local_irk.addr;
+    }
+    return 0;
+}
+
+static void drop_stale_local_irks(const uint8_t mac[6])
+{
+    irk_scan_t s = { .ours.type = BLE_ADDR_PUBLIC };
+    for (int i = 0; i < 6; i++) {
+        s.ours.val[i] = mac[5 - i];   /* NimBLE addresses are little-endian */
+    }
+    ble_store_iterate(BLE_STORE_OBJ_TYPE_LOCAL_IRK, irk_scan, &s);
+    for (int i = 0; i < s.n; i++) {
+        struct ble_store_key_local_irk key = { .addr = s.stale[i] };
+        const uint8_t *a = s.stale[i].val;
+        int rc = ble_store_delete_local_irk(&key);
+        ESP_LOGI(TAG, "removed the local IRK of old address %02X:%02X:%02X:%02X:%02X:%02X (rc=%d)",
+                 a[5], a[4], a[3], a[2], a[1], a[0], rc);
+    }
+}
+
 esp_err_t telemetry_ble_init(const char *name)
 {
     /* As the VPro firmware: Bluetooth address = the chip's BT MAC + 1. Its comment: a
      * workaround for iOS caching (a new address makes iOS see a new device). esp_read_mac()
      * returns the eFuse-derived address, so this is the same on every boot. */
-    uint8_t mac[6];
-    if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+    uint8_t mac[6] = { 0 };
+    bool have_mac = esp_read_mac(mac, ESP_MAC_BT) == ESP_OK;
+    if (have_mac) {
         mac[5] += BLE_ADDR_OFFSET;
         esp_iface_mac_addr_set(mac, ESP_MAC_BT);
     }
@@ -365,6 +406,9 @@ esp_err_t telemetry_ble_init(const char *name)
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
     ble_store_config_init();
+    if (have_mac) {
+        drop_stale_local_irks(mac);
+    }
     ble_att_set_preferred_mtu(247);
     gateways_load();
     err = fleet_key_init();
