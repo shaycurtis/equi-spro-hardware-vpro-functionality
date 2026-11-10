@@ -100,6 +100,8 @@
       <div class="chart"><h3>Temperature &amp; humidity</h3><div class="box"><canvas id="chEnv"></canvas></div></div>
       <div class="chart"><h3>Heart rate (bpm, median over each 60 s)</h3><div class="box"><canvas id="chHr"></canvas></div></div>
       <div class="chart"><h3>Activity (steps per interval)</h3><div class="box"><canvas id="chSteps"></canvas></div></div>
+      <div class="chart"><h3>Horse temperature (DS18B20 probe, °C)</h3><div class="box"><canvas id="chProbe"></canvas></div></div>
+      <div class="chart"><h3>Position (at each reading)</h3><div class="box"><canvas id="chPos"></canvas></div></div>
       <div class="chart"><h3>Reception (best RSSI and adverts heard per burst)</h3><div class="box"><canvas id="chRx"></canvas></div></div>
       <div class="chart ecgcard">
         <div class="ecg-head">
@@ -348,10 +350,40 @@ async function loadDetail() {
   draw("chHr", "line", [line("Heart rate bpm", "hr", css("--bad"))], { y: { suggestedMin: 20, suggestedMax: 100 } });
   draw("chSteps", "bar", [{ label: "Steps", data: series(rows, "steps_delta"), backgroundColor: css("--c4"),
        barThickness: "flex", maxBarThickness: 8 }], { y: { beginAtZero: true } });
+  const boardRef = { ...line("Board °C", "temp", css("--muted")), borderWidth: 1, borderDash: [4, 4] };
+  draw("chProbe", "line", [line("Probe °C", "probe", css("--c2")), boardRef],
+       { y: { title: { display: true, text: "°C", color: css("--muted") } } });
+  drawPositions(data.positions || []);
   draw("chRx", "line", [line("Best RSSI dBm", "rssi", css("--c1")),
        { ...line("Adverts per burst", "packets", css("--c3"), "y1"), type: "bar", maxBarThickness: 6 }],
        { y: { title: { display: true, text: "dBm", color: css("--muted") } },
          y1: { position: "right", min: 0, max: 22, title: { display: true, text: "adverts", color: css("--muted") } } });
+}
+
+// Position names in the device's numbering (equi_protocol.POSITIONS): the y value of the step chart.
+const POSITIONS = ["unknown", "lateral", "sternal", "rolling", "standing", "moving"];
+function drawPositions(list) {
+  const pts = [];
+  let prevT = null;
+  for (const p of list) {
+    const y = POSITIONS.indexOf(p.pos);
+    if (y < 0) continue;
+    if (prevT !== null && p.t - prevT > 3 * 60) pts.push({ x: (prevT + 60) * 1000, y: null });   // gap
+    pts.push({ x: p.t * 1000, y, seen: p.seen });
+    prevT = p.t;
+  }
+  const c = css("--c4");
+  draw("chPos", "line", [{ label: "Position", data: pts, borderColor: c, backgroundColor: c, stepped: "before",
+       pointRadius: 2, pointHitRadius: 6, borderWidth: 2, spanGaps: false }],
+       { y: { min: 0, max: POSITIONS.length - 1, ticks: { color: css("--muted"), stepSize: 1,
+              callback: (v) => POSITIONS[v] ?? "" } } });
+  const ch = charts.chPos;
+  ch.options.plugins.legend.display = false;
+  ch.options.plugins.tooltip.callbacks.label = (it) => {
+    const seen = it.raw.seen ? ` (held: ${it.raw.seen.split(",").join(", ")})` : "";
+    return `${POSITIONS[it.parsed.y]}${seen}`;
+  };
+  ch.update();
 }
 
 let ecgShown = null;

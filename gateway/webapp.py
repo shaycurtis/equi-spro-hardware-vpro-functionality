@@ -173,14 +173,15 @@ def api_readings(db: Path, device: str, hours: float, session: int | None = None
         rows = query(db, f"""
             SELECT {EPOCH} AS t, battery_soc AS soc, battery_mv AS mv, temp_c AS temp, humidity AS rh,
                    steps, rssi_best AS rssi, packets, usb, charging, charge_full, heart_rate AS hr,
-                   position IS NOT NULL AS per_period, steps AS steps_sum
+                   position IS NOT NULL AS per_period, steps AS steps_sum, horse_temp AS probe
             FROM readings WHERE {where} ORDER BY id""", args)
     else:
         rows = query(db, f"""
             SELECT MIN({EPOCH}) AS t, AVG(battery_soc) AS soc, AVG(battery_mv) AS mv, AVG(temp_c) AS temp,
                    AVG(humidity) AS rh, MAX(steps) AS steps, AVG(rssi_best) AS rssi, AVG(packets) AS packets,
                    MAX(usb) AS usb, MAX(charging) AS charging, MAX(charge_full) AS charge_full,
-                   AVG(heart_rate) AS hr, MAX(position IS NOT NULL) AS per_period, SUM(steps) AS steps_sum
+                   AVG(heart_rate) AS hr, MAX(position IS NOT NULL) AS per_period, SUM(steps) AS steps_sum,
+                   AVG(horse_temp) AS probe
             FROM readings WHERE {where}
             GROUP BY {EPOCH} / ? ORDER BY t""", args + (bucket,))
     # Steps per interval. Advert v6 (rows with a position) sends the steps of each reading's own
@@ -203,8 +204,13 @@ def api_readings(db: Path, device: str, hours: float, session: int | None = None
         else:
             r["steps_delta"] = s - prev
         prev = s
+    # Position is a category (no averages): every reading's, for a step chart.
+    positions = query(db, f"""
+        SELECT {EPOCH} AS t, position AS pos, positions_seen AS seen
+        FROM readings WHERE {where} AND position IS NOT NULL ORDER BY id""", args)
     return {"device": device, "hours": hours, "session": session,
-            "bucket_s": bucket if bucket > SAMPLE_PERIOD_S else SAMPLE_PERIOD_S, "rows": rows}
+            "bucket_s": bucket if bucket > SAMPLE_PERIOD_S else SAMPLE_PERIOD_S, "rows": rows,
+            "positions": positions}
 
 
 def api_ecg_list(db: Path, device: str, session: int | None = None) -> list[dict]:
