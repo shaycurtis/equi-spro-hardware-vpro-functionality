@@ -133,6 +133,8 @@ static void sleep_pins_setup(void);
 static bool s_booting;   /* inside power_boot(): no app tasks running yet */
 static bool s_prov_gesture;
 static power_charge_only_hook_t s_charge_hook;
+static volatile bool s_d2_claimed;
+static volatile power_charge_t s_charge_shown = (power_charge_t)-1;
 
 bool power_boot_prov_gesture(void) { return s_prov_gesture; }
 void power_set_charge_only_hook(power_charge_only_hook_t fn) { s_charge_hook = fn; }
@@ -148,10 +150,27 @@ power_charge_t power_charge_now(void)
 static void show_charge(power_charge_t c)
 {
     led_colour_t col = charge_colour(c);
+    s_charge_shown = c;
+    if (s_d2_claimed) {
+        status_led_set_mode(LED_IDX_STATUS, LED_MODE_SOLID, col);   /* D1: charge; D2: Wi-Fi state */
+        return;
+    }
     status_led_set(col);                                   /* one frame: both LEDs together */
     status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, col);
     status_led_set_mode(LED_IDX_STATUS, LED_MODE_SOLID, col);
     status_led_override_clear();                           /* same colours: no new frame */
+}
+
+void power_charge_only_claim_status_led(bool claimed)
+{
+    s_d2_claimed = claimed;
+    if (s_charge_shown != (power_charge_t)-1) {
+        led_colour_t col = charge_colour(s_charge_shown);
+        status_led_set_mode(LED_IDX_STATUS, LED_MODE_SOLID, col);       /* D1 always the charge */
+        if (!claimed) {
+            status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, col);
+        }
+    }
 }
 
 /*

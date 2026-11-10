@@ -43,7 +43,7 @@ class Api:
         self.posted = []
 
     def get_org_id(self, d):
-        return "org-1" if d == "15B0B4" else None
+        return "org-1" if d == "50787DFFFE15B0B4" else None
 
     def post_measurements(self, d):
         self.posted.append(d)
@@ -81,7 +81,7 @@ class GatewayToLambda(unittest.TestCase):
         self.assertEqual((a["sessionId"], a["horseId"], a["signalStrength"]), (SESSION, HORSE, "high"))
         self.assertEqual(b["sessionId"], SESSION)            # identity carried over to burst 2
         self.assertEqual(b["signalStrength"], "medium")      # best of -75 / -73
-        self.assertEqual((a["deviceId"], a["heartRate"], a["steps"], a["batteryLevel"]), ("15B0B4", 44, 77, 80))
+        self.assertEqual((a["deviceId"], a["heartRate"], a["steps"], a["batteryLevel"]), ("50787DFFFE15B0B4", 44, 77, 80))
 
 
 if __name__ == "__main__":

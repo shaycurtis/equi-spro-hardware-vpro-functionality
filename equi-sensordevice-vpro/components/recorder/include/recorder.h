@@ -30,7 +30,7 @@
 #define RECORDER_FLUSH_S   30
 
 typedef struct {
-    uint32_t device_id;
+    const char *device_id;   /* backend ID, e.g. "50787DFFFE15B0B4" (file names, EDF header) */
     uint64_t session;        /* Unix time in ms */
     uint32_t epoch;          /* Unix time now, 0 = unknown */
     const char *horse;       /* 15-digit chip number, NULL = unknown */
@@ -51,7 +51,7 @@ void recorder_new_session(uint64_t session, uint32_t epoch, const char *horse);
  * is not already recording ECG; one at a time. Stopping saves it (keep) or deletes it.
  */
 typedef struct {
-    uint32_t device_id;
+    const char *device_id;   /* backend ID */
     uint64_t session;        /* folder: the current session, or the recording ID if none */
     uint64_t id;             /* recording ID = start time, ms */
     uint32_t epoch;          /* EDF start date/time (Unix s), 0 = unknown */

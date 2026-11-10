@@ -3,8 +3,10 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 #include "freertos/FreeRTOS.h"
@@ -24,6 +26,7 @@ static const char *TAG = "recorder";
 #define MAX_SIGNALS    9
 #define OFF_NRECORDS   236
 #define STARVE_RECORDS 10                   /* a signal this far behind the others is padded */
+#define TAL_SAMPLES    60                   /* EDF Annotations signal: 120 bytes per record (as VPro) */
 
 /* ------------------------------------------------------------ data model */
 
@@ -50,7 +53,13 @@ typedef struct {
     FILE *f;
     char path[112];
     int16_t *chunk;                         /* staging buffer for fwrite (one per writer task) */
-    int64_t t0;                             /* esp_timer time of sample 0 */
+    int64_t t0;                             /* esp_timer time of sample 0 (the first real one) */
+    int64_t t0_epoch_ms;                    /* the same in Unix ms, 0 = clock not set */
+    uint32_t hdr_epoch;                     /* this file's header start (Unix s), 0 = unknown */
+    uint32_t file_start;                    /* first sample of this file (signal 0's index) */
+    double rec_s;                           /* record duration, seconds */
+    double onset0;                          /* first record's onset after the header start, s */
+    bool onset_set;
     uint32_t records;
     volatile uint32_t dropped;
     bool starving;                          /* warned about a signal that stopped */
@@ -64,7 +73,7 @@ typedef struct {
     char horse[16];
 } meta_t;
 
-static uint32_t s_dev_id;
+static char s_dev_id[24];
 static stream_t s_ecg, s_imu;
 static stream_t *s_streams[2];
 static int s_nstreams;
@@ -107,6 +116,25 @@ static void sig_push(stream_t *st, sig_t *s, const int16_t *v, size_t n, size_t 
     __atomic_store_n(&s->head, head + n, __ATOMIC_RELEASE);
 }
 
+/* Unix ms of an esp_timer time, 0 if the clock is not set. */
+static int64_t epoch_ms_at(int64_t us)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if (tv.tv_sec < 1704067200) {
+        return 0;
+    }
+    return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000 - (esp_timer_get_time() - us) / 1000;
+}
+
+/* The first batch of a stream: it starts here (EDF+ gives each file's exact start). */
+static void stream_first(stream_t *st, int64_t first_us)
+{
+    st->t0 = first_us;
+    st->t0_epoch_ms = epoch_ms_at(first_us);
+    st->started = true;
+}
+
 static void ecg_push(const int16_t *v, size_t n, void *ctx)
 {
     stream_t *st = ctx;   /* the session's ECG file, or an app recording */
@@ -117,7 +145,7 @@ static void ecg_push(const int16_t *v, size_t n, void *ctx)
     if (!st->started) {
         /* the newest sample was converted about now */
         first_us = esp_timer_get_time() - (int64_t)((n - 1) * 1e6f / st->sig[0].rate);
-        st->started = true;
+        stream_first(st, first_us);
     }
     sig_push(st, &st->sig[0], v, n, 1, first_us);
 }
@@ -131,7 +159,7 @@ static void imu_push(const imu_batch_t *b, void *ctx)
     int64_t first_us = 0;
     if (!st->started) {
         first_us = b->first_us ? b->first_us : esp_timer_get_time();
-        st->started = true;
+        stream_first(st, first_us);
     }
     for (int a = 0; a < 3; a++) {
         sig_push(st, &st->sig[a], &b->acc[0][a], b->n_acc, 3, first_us);
@@ -151,9 +179,17 @@ static void field(char *dst, size_t len, const char *src)
     memcpy(dst, src, n < len ? n : len);
 }
 
+/*
+ * EDF+C, as the VPro firmware writes (edflib): EDF+ patient / recording subfields and one
+ * "EDF Annotations" signal whose time-keeping TAL gives each record's onset, so the file's
+ * start is exact to the sample although the header start time has 1 s resolution.
+ */
 static void write_header(stream_t *st, const meta_t *m)
 {
-    int ns = st->nsig;
+    static const char *MON[] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                 "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+    int nd = st->nsig;            /* data signals */
+    int ns = nd + 1;              /* + EDF Annotations */
     size_t len = 256 * (size_t)(ns + 1);
     char *h = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
     if (!h) {
@@ -162,52 +198,86 @@ static void write_header(stream_t *st, const meta_t *m)
     char buf[96];
     memset(h, ' ', len);
     field(h + 0, 8, "0");
-    snprintf(buf, sizeof(buf), "%s", m->horse[0] ? m->horse : "Unknown");   /* patient = chip number */
+    /* EDF+ patient: code sex birthdate name (X = unknown); code = the chip number */
+    snprintf(buf, sizeof(buf), "%s X X X", m->horse[0] ? m->horse : "Unknown");
     field(h + 8, 80, buf);
-    snprintf(buf, sizeof(buf), "Device EQUI_%06lX Session %llu VPro", (unsigned long)s_dev_id,
-             (unsigned long long)m->session);
-    field(h + 88, 80, buf);
     struct tm t = { .tm_mday = 1, .tm_mon = 0, .tm_year = 85 };   /* EDF "unknown": 01.01.85 */
     if (m->epoch) {
         time_t e = m->epoch;
         gmtime_r(&e, &t);
+        /* EDF+ recording: Startdate dd-MMM-yyyy admincode technician equipment */
+        snprintf(buf, sizeof(buf), "Startdate %02d-%s-%04d X X X", t.tm_mday, MON[t.tm_mon], t.tm_year + 1900);
+    } else {
+        strlcpy(buf, "Startdate X X X X", sizeof(buf));
     }
+    field(h + 88, 80, buf);
     snprintf(buf, sizeof(buf), "%02d.%02d.%02d", t.tm_mday, t.tm_mon + 1, t.tm_year % 100);
     field(h + 168, 8, buf);
     snprintf(buf, sizeof(buf), "%02d.%02d.%02d", t.tm_hour, t.tm_min, t.tm_sec);
     field(h + 176, 8, buf);
     snprintf(buf, sizeof(buf), "%u", (unsigned)len);
     field(h + 184, 8, buf);
+    field(h + 192, 44, "EDF+C");
     field(h + OFF_NRECORDS, 8, "-1");      /* "unknown" until the first flush */
     field(h + 244, 8, st->duration);
     snprintf(buf, sizeof(buf), "%d", ns);
     field(h + 252, 4, buf);
 
-    /* Signal fields are stored field by field: all labels, then all transducers, ... */
+    /* Signal fields are stored field by field: all labels, then all transducers, ...
+     * The last signal is EDF Annotations (blank text fields, -1..1, TAL_SAMPLES). */
+#define SIGF(expr, ann) (i < nd ? (expr) : (ann))
     char *p = h + 256;
-    for (int i = 0; i < ns; i++) field(p + i * 16, 16, st->sig[i].label);
+    for (int i = 0; i < ns; i++) field(p + i * 16, 16, SIGF(st->sig[i].label, "EDF Annotations"));
     p += 16 * ns;
-    for (int i = 0; i < ns; i++) field(p + i * 80, 80, st->sig[i].transducer);
+    for (int i = 0; i < ns; i++) field(p + i * 80, 80, SIGF(st->sig[i].transducer, ""));
     p += 80 * ns;
-    for (int i = 0; i < ns; i++) field(p + i * 8, 8, st->sig[i].dim);
+    for (int i = 0; i < ns; i++) field(p + i * 8, 8, SIGF(st->sig[i].dim, ""));
     p += 8 * ns;
-    for (int i = 0; i < ns; i++) field(p + i * 8, 8, st->sig[i].phys_min);
+    for (int i = 0; i < ns; i++) field(p + i * 8, 8, SIGF(st->sig[i].phys_min, "-1"));
     p += 8 * ns;
-    for (int i = 0; i < ns; i++) field(p + i * 8, 8, st->sig[i].phys_max);
+    for (int i = 0; i < ns; i++) field(p + i * 8, 8, SIGF(st->sig[i].phys_max, "1"));
     p += 8 * ns;
     for (int i = 0; i < ns; i++) field(p + i * 8, 8, "-32768");
     p += 8 * ns;
     for (int i = 0; i < ns; i++) field(p + i * 8, 8, "32767");
     p += 8 * ns;
-    for (int i = 0; i < ns; i++) field(p + i * 80, 80, st->sig[i].prefilter);
+    for (int i = 0; i < ns; i++) field(p + i * 80, 80, SIGF(st->sig[i].prefilter, ""));
     p += 80 * ns;
     for (int i = 0; i < ns; i++) {
-        snprintf(buf, sizeof(buf), "%u", st->sig[i].spr);
+        snprintf(buf, sizeof(buf), "%u", i < nd ? st->sig[i].spr : TAL_SAMPLES);
         field(p + i * 8, 8, buf);
     }
+#undef SIGF
     /* the remaining 32 bytes per signal are reserved (spaces) */
     fwrite(h, 1, len, st->f);
     free(h);
+}
+
+/* The record's time-keeping TAL ("+<onset>" 0x14 0x14 0x00, zero padded), as edflib writes it. */
+static void write_tal(stream_t *st)
+{
+    if (!st->onset_set) {
+        /* This file's first sample, relative to the start second in its header. */
+        double onset = 0;
+        if (st->t0_epoch_ms && st->hdr_epoch) {
+            double first_ms = st->t0_epoch_ms + st->file_start * 1000.0 / st->sig[0].rate;
+            onset = (first_ms - st->hdr_epoch * 1000.0) / 1000.0;
+            if (onset < 0) {
+                onset = 0;
+            }
+        }
+        st->onset0 = onset;
+        st->onset_set = true;
+    }
+    char tal[TAL_SAMPLES * 2] = { 0 };
+    int n = snprintf(tal, sizeof(tal), "+%.7f", st->onset0 + st->records * st->rec_s);
+    if (n > 0 && n + 3 <= (int)sizeof(tal)) {
+        tal[n] = 0x14;
+        tal[n + 1] = 0x14;   /* empty annotation list; the rest stays 0 */
+    }
+    if (st->f) {
+        fwrite(tal, 1, sizeof(tal), st->f);
+    }
 }
 
 static void open_file(stream_t *st, const meta_t *m)
@@ -216,7 +286,7 @@ static void open_file(stream_t *st, const meta_t *m)
     mkdir(STORAGE_MOUNT "/sessions", 0777);                       /* EEXIST is fine */
     int n = snprintf(path, sizeof(st->path), STORAGE_MOUNT "/sessions/%llu", (unsigned long long)m->session);
     mkdir(path, 0777);
-    snprintf(path + n, sizeof(st->path) - n, "/%s_%06lX_%s_%llu.edf", st->type, (unsigned long)s_dev_id,
+    snprintf(path + n, sizeof(st->path) - n, "/%s_%s_%s_%llu.edf", st->type, s_dev_id,
              m->horse[0] ? m->horse : "Unknown", (unsigned long long)m->file_id);
     st->f = fopen(path, "wb");
     if (!st->f) {
@@ -224,6 +294,10 @@ static void open_file(stream_t *st, const meta_t *m)
         return;
     }
     setvbuf(st->f, NULL, _IOFBF, 8192);
+    st->hdr_epoch = m->epoch;
+    st->file_start = st->sig[0].tail;
+    st->rec_s = strtod(st->duration, NULL);
+    st->onset_set = false;
     write_header(st, m);
     fflush(st->f);
     st->records = 0;
@@ -303,6 +377,7 @@ static void write_records(stream_t *st, const uint32_t *limit, bool pad)
         for (int i = 0; i < st->nsig; i++) {
             write_sig(st, &st->sig[i], st->sig[i].spr, limit[i]);
         }
+        write_tal(st);
         st->records++;
     }
 }
@@ -400,8 +475,8 @@ static esp_err_t setup_ecg(stream_t *st, uint16_t rate)
     /* int16 = 18-bit sample >> 2: 0.3814697265625 uV/LSB, so -32768..32767 = -12.5..12.49962 mV
      * (mV as the VPro platform's ECG files, which its backend processing reads) */
     st->sig[0] = mk_sig("ECG", "Electrodes (MAX30001, gain 80)", "mV", "-12.5", "12.49962",
-                          "HP:0.5Hz LP:40Hz", rate, rate);
-    strlcpy(st->duration, "1", sizeof(st->duration));
+                          "HP:0.5Hz LP:40Hz", rate / 2, rate);
+    strlcpy(st->duration, "0.5", sizeof(st->duration));   /* 0.5 s records, as VPro */
     return sig_alloc(&st->sig[0]);
 }
 
@@ -453,7 +528,7 @@ esp_err_t recorder_start(const recorder_cfg_t *cfg)
     if (!cfg->ecg_rate_hz && !cfg->imu_rate_hz) {
         return ESP_OK;   /* nothing to record */
     }
-    s_dev_id = cfg->device_id;
+    strlcpy(s_dev_id, cfg->device_id ? cfg->device_id : "", sizeof(s_dev_id));
     s_t0 = esp_timer_get_time();
     s_lock = xSemaphoreCreateMutex();
     s_chunk = heap_caps_malloc(CHUNK_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
@@ -623,7 +698,7 @@ esp_err_t recorder_clip_start(const recorder_clip_cfg_t *c)
         free(s_clip.sig[0].ring);
         return ESP_ERR_NO_MEM;
     }
-    s_dev_id = c->device_id;
+    strlcpy(s_dev_id, c->device_id ? c->device_id : "", sizeof(s_dev_id));
     meta_t m = { .session = c->session, .file_id = c->id, .epoch = c->epoch };
     set_horse(&m, c->horse);
     s_clip.t0 = esp_timer_get_time();

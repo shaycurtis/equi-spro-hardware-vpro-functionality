@@ -86,3 +86,7 @@ power_charge_t power_charge_now(void);
  * Register before power_boot(). */
 typedef void (*power_charge_only_hook_t)(void);
 void power_set_charge_only_hook(power_charge_only_hook_t fn);
+
+/* Charge-only: true = D2 shows something else (the Wi-Fi state); the charge colour is then only
+ * on D1, the more visible LED. false = both LEDs show the charge colour again. */
+void power_charge_only_claim_status_led(bool claimed);

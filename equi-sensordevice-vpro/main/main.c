@@ -173,7 +173,7 @@ static bool identity_delivered(void)
 static void show_status_led(void)
 {
     if (!identity_delivered()) {
-        status_led_set_mode(LED_IDX_STATUS, LED_MODE_SOLID, LED_BLUE);
+        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, LED_BLUE);
     } else {
         status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE,
                             telemetry_gateway_seen(GATEWAY_SEEN_MS) ? LED_LINKED : LED_RUNNING);
@@ -201,7 +201,7 @@ static esp_err_t app_rec_start(uint64_t id, uint32_t seconds)
         return ESP_ERR_NOT_SUPPORTED;
     }
     recorder_clip_cfg_t c = {
-        .device_id = s_dev_id,
+        .device_id = device_id_backend_get(),
         .session = s_session ? s_session : id,
         .id = id,
         .epoch = id > 1000000000000ULL ? (uint32_t)(id / 1000) : now_epoch(),
@@ -242,6 +242,33 @@ static void cloud_set_time(uint32_t epoch)
     sensors_set_time(epoch);   /* RTC + system clock */
 }
 
+/* Charge-only LEDs: D1 (the more visible one) shows the charge, D2 the Wi-Fi / upload state.
+ * Orange = Wi-Fi / upload problem (purple is kept for OTA updates later). */
+static void cloud_show(cloud_show_t st)
+{
+    switch (st) {
+    case CLOUD_SHOW_CONNECTING:
+        power_charge_only_claim_status_led(true);
+        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_BLINK, LED_BLUE);
+        break;
+    case CLOUD_SHOW_UPLOADING:
+        power_charge_only_claim_status_led(true);
+        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_BREATHE, LED_BLUE);
+        break;
+    case CLOUD_SHOW_SYNCED:
+        power_charge_only_claim_status_led(true);
+        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, LED_BLUE);
+        break;
+    case CLOUD_SHOW_FAILED:
+        power_charge_only_claim_status_led(true);
+        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_PULSE, LED_ORANGE);
+        break;
+    default:
+        power_charge_only_claim_status_led(false);   /* back to the charge colour */
+        break;
+    }
+}
+
 /* Charge-only on USB: start the backend task (Wi-Fi to a saved network, time, telemetry). */
 static void on_charge_only(void)
 {
@@ -260,14 +287,15 @@ static void on_charge_only(void)
         strlcpy(s_last_update, "1970-01-01T00:00:00Z", sizeof(s_last_update));
     }
     cloud_cfg_t c = {
-        .device_id = device_id_get(),   /* "15B0B4": the ID the backend knows the device by */
+        .device_id = device_id_backend_get(),   /* e.g. "50787DFFFE15B0B4": as the backend knows it */
         .hw_version = CLOUD_HW_VERSION,
         .fw_version = s_fw_ver,
         .last_update = s_last_update,
         .read_status = cloud_read_status,
         .set_time = cloud_set_time,
+        .show = cloud_show,
     };
-    ESP_LOGI(TAG, "charging: backend task for device %s", device_id_get());
+    ESP_LOGI(TAG, "charging: backend task for device %s", device_id_backend_get());
     cloud_charging_start(&c);
 }
 
@@ -285,7 +313,7 @@ static void start_session(uint64_t packed, const char *horse)
     if (storage_mounted() && (cfg->ecg_log || cfg->imu_log)) {
         if (first) {
             recorder_cfg_t rc = {
-                .device_id = s_dev_id, .session = s_session, .epoch = epoch, .horse = horse,
+                .device_id = device_id_backend_get(), .session = s_session, .epoch = epoch, .horse = horse,
                 .ecg_rate_hz = cfg->ecg_log ? cfg->ecg_rate_hz : 0,
                 .imu_rate_hz = cfg->imu_log ? cfg->imu_rate_hz : 0,
             };
@@ -507,7 +535,7 @@ void app_main(void)
     char name[24];
     /* "EQUI_" + the device ID, as VPro's BOARD_HOSTNAME_PREFIX + ID. The Equimetrics app only
      * connects to IDs registered in the backend (the devices record for "15B0B4"). */
-    snprintf(name, sizeof(name), "EQUI_%s", device_id_get());
+    snprintf(name, sizeof(name), "EQUI_%s", device_id_backend_get());   /* the app needs the full ID */
     ESP_ERROR_CHECK(telemetry_ble_init(name));   /* identity is published when the session starts */
     telemetry_set_recording_hooks(app_rec_start, app_rec_stop);
     power_register_shutdown_cb(telemetry_ble_stop);

@@ -52,3 +52,15 @@ const char *device_id_get(void)
     }
     return s_id;
 }
+
+const char *device_id_backend_get(void)
+{
+    static char s_long[24];
+    if (!s_long[0]) {
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        snprintf(s_long, sizeof(s_long), "%02X%02X%02XFFFE%s", mac[0], mac[1], mac[2], device_id_get());
+        ESP_LOGI(TAG, "backend device ID: %s", s_long);
+    }
+    return s_long;
+}

@@ -34,8 +34,10 @@ Environment variables:
     FLEET_KEY_SECRET_NAME      default "vpro/dev/ble-fleet-key"
     FLEET_KEY_SECRET_PROPERTY  default "fleetKey"
     DEVICE_MAP                 optional JSON {"<BLE short ID>": "<backend device ID>"} for devices
-                               registered under another ID; by default the short ID (e.g.
-                               "15B0B4") is the backend device ID
+                               registered under another ID. By default the backend device ID is
+                               the EUI-64 the firmware uses (device_id_backend_get): the advert
+                               MAC's OUI + FFFE + the short ID, e.g. 50:78:7D:.. + 15B0B4 ->
+                               "50787DFFFE15B0B4" (the VPro app only lists IDs of this form)
     POST_WITHOUT_SESSION       "true" to also post readings that have no session yet (default: skip)
 """
 import json
@@ -91,6 +93,14 @@ def device_map() -> dict:
 
 # ------------------------------------------------------------------------------ decoding
 
+def backend_id(short_id: str, mac) -> str:
+    """EUI-64 device ID from the advert address's OUI and the 6-digit ID in the advert."""
+    octets = (mac or "").replace("-", ":").split(":")
+    if len(octets) == 6 and all(len(o) == 2 for o in octets[:3]):
+        return ("".join(octets[:3]) + "FFFE" + short_id).upper()
+    return short_id
+
+
 def mfg_payloads(hex_ad: str):
     """Yield the bytes after the company ID of each of our manufacturer-data AD structures."""
     if not hex_ad:
@@ -126,10 +136,10 @@ def charger_status(t: proto.Telemetry) -> str:
 
 def collect(event: dict):
     """Decode a gateway message: unique telemetry readings and the identities seen."""
-    readings = {}     # (device, tag, seq) -> {"t": Telemetry, "rssi", "ts"}
+    readings = {}     # (device, tag, seq) -> {"t": Telemetry, "rssi", "ts", "mac"}
     identities = {}   # device -> list of Identity
     for item in event.get("items", []):
-        rssi, ts = item.get("rssi"), item.get("ts")
+        rssi, ts, mac = item.get("rssi"), item.get("ts"), item.get("mac")
         for field in ("adv", "rsp"):
             for payload in mfg_payloads(item.get(field, "")):
                 d = proto.decode(payload)
@@ -137,12 +147,13 @@ def collect(event: dict):
                     key = (d.device_id, d.session_tag, d.seq)
                     r = readings.get(key)
                     if r is None:
-                        readings[key] = {"t": d, "rssi": rssi, "ts": ts}
+                        readings[key] = {"t": d, "rssi": rssi, "ts": ts, "mac": mac}
                     else:
                         if rssi is not None and (r["rssi"] is None or rssi > r["rssi"]):
                             r["rssi"] = rssi
                         if ts is not None and (r["ts"] is None or ts < r["ts"]):
                             r["ts"] = ts
+                        r["mac"] = r["mac"] or mac
                 elif isinstance(d, proto.Identity):
                     identities.setdefault(d.device_id, [])
                     if d not in identities[d.device_id]:
@@ -208,7 +219,7 @@ def process(event: dict, api, dev_map: dict, post_without_session: bool = False)
             logger.info(f"{short_id} seq {seq}: no session yet (tag {tag}), skipped")
             stats["skipped"] += 1
             continue
-        device_id = dev_map.get(short_id, short_id)
+        device_id = dev_map.get(short_id) or backend_id(short_id, r["mac"])
         if device_id not in org_cache:
             org_cache[device_id] = api.get_org_id(device_id)
         org_id = org_cache[device_id]

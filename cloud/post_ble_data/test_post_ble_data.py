@@ -69,8 +69,8 @@ class FakeSecrets:
         return {"SecretString": json.dumps({"fleetKey": TEST_KEY.hex()})}
 
 
-MAP = {}                                  # default: the short ID is the backend device ID
-ORGS = {"15B0B4": "org-123"}
+MAP = {}                                  # default: EUI-64 from the advert MAC + short ID
+ORGS = {"50787DFFFE15B0B4": "org-123", "15B0B4": "org-123"}   # short: items without a MAC
 
 
 class PostBleDataTest(unittest.TestCase):
@@ -91,7 +91,7 @@ class PostBleDataTest(unittest.TestCase):
         stats = lam.process(ev, api, MAP)
         self.assertEqual(stats, {"readings": 1, "posted": 1, "skipped": 0})
         d = api.posted[0]
-        self.assertEqual(d["deviceId"], "15B0B4")
+        self.assertEqual(d["deviceId"], "50787DFFFE15B0B4")   # OUI of 50:78:7D:15:B0:B8 + FFFE + 15B0B4
         self.assertEqual(d["organisationId"], "org-123")
         self.assertEqual(d["sessionId"], SESSION)
         self.assertEqual(d["horseId"], HORSE)
@@ -162,6 +162,11 @@ class PostBleDataTest(unittest.TestCase):
         other = (ad(0x01, b"\x06") + ad(0xFF, struct.pack("<H", 0x004C) + b"\x02\x15" + bytes(21))).hex()
         ev = {"gatewayId": "G", "items": [{"rssi": -50, "ts": 1, "adv": other}, {"rssi": -50, "ts": 1, "adv": "zz"}]}
         self.assertEqual(lam.process(ev, FakeApi(ORGS), MAP), {"readings": 0, "posted": 0, "skipped": 0})
+
+    def test_backend_id_from_the_advert_mac(self):
+        self.assertEqual(lam.backend_id("236B2C", "cc:ba:97:23:6b:31"), "CCBA97FFFE236B2C")
+        self.assertEqual(lam.backend_id("15B0B4", "50-78-7D-15-B0-B8"), "50787DFFFE15B0B4")
+        self.assertEqual(lam.backend_id("15B0B4", None), "15B0B4")    # no MAC: short ID
 
     def test_device_map_env(self):
         os.environ["DEVICE_MAP"] = '{"15b0b4": "OTHERID"}'

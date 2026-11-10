@@ -18,7 +18,7 @@ Tests (offline, no AWS): `python -m unittest cloud/post_ble_data/test_post_ble_d
 
 | Measurement | From |
 |---|---|
-| deviceId | the advert's device ID, e.g. `15B0B4` (optional `DEVICE_MAP` for devices registered under another ID) |
+| deviceId | EUI-64: the advert MAC's OUI + `FFFE` + the advert's 6-digit ID, e.g. `50787DFFFE15B0B4` (as the firmware's `device_id_backend_get`; optional `DEVICE_MAP` overrides) |
 | organisationId | `get_org_id(deviceId)` (unregistered devices are skipped, as LoRa raises) |
 | gatewayId, signalStrength | the gateway message; best RSSI of the burst (>= -70 high, >= -85 medium, else low) |
 | timestamp | gateway receive time of the burst's first advert (Unix ms) |
