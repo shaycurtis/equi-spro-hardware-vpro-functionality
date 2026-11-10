@@ -13,7 +13,8 @@
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "network_provisioning/manager.h"
-#include "network_provisioning/scheme_softap.h"
+#include "sdkconfig.h"
+#include "network_provisioning/scheme_ble.h"
 #include "power.h"
 #include "status_led.h"
 #include "telemetry.h"
@@ -161,8 +162,6 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         default:
             break;
         }
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
-        ESP_LOGI(TAG, "phone joined the setup network");
     }
 }
 
@@ -188,7 +187,7 @@ static esp_err_t init_default_loop(void)
     return err == ESP_ERR_INVALID_STATE ? ESP_OK : err;   /* already created */
 }
 
-void prov_run(uint32_t device_id)
+void prov_run(const char *ble_name)
 {
     /* Locked / provisioning: both LEDs steady white (same as the SPro production firmware). */
     power_set_charge_led(false);
@@ -198,36 +197,34 @@ void prov_run(uint32_t device_id)
 
     esp_pm_lock_handle_t lock;
     if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "prov", &lock) == ESP_OK) {
-        esp_pm_lock_acquire(lock);   /* access point + HTTP server: stay awake */
+        esp_pm_lock_acquire(lock);   /* radio + provisioning server: stay awake */
     }
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(init_default_loop());
     ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, on_event, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, on_event, NULL));
     esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+    /* Same Bluetooth address (and name) as the normal session, so the phone sees one device. */
+    telemetry_ble_set_address(NULL);
+
+    /* No BT memory release: the device powers off (or restarts) when provisioning ends. */
     network_prov_mgr_config_t config = {
-        .scheme = network_prov_scheme_softap,
+        .scheme = network_prov_scheme_ble,
         .scheme_event_handler = NETWORK_PROV_EVENT_HANDLER_NONE,
     };
     ESP_ERROR_CHECK(network_prov_mgr_init(config));
 
-    char name[16], code[9];
-    snprintf(name, sizeof(name), "PROV_%06lX", (unsigned long)device_id);
-    telemetry_device_setup_code(device_id, code);
-    ESP_LOGI(TAG, "provisioning mode: join Wi-Fi \"%s\" (password %s), setup code %s", name, code, code);
-    ESP_LOGI(TAG, "QR payload: {\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"softap\","
-             "\"password\":\"%s\"}", name, code, code);
-
-    /* Security 1 (X25519 + AES-CTR) with the setup code as proof of possession; the access point
-     * uses the same code as its WPA2 password. Both must stay valid until NETWORK_PROV_END. */
-    static char pop[9];
-    memcpy(pop, code, sizeof(pop));
-    ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1, (const void *)pop, name, pop));
+    /* As the original VPro firmware and its app: BLE name "EQUI_<id>", security 1, a fixed proof
+     * of possession, the default provisioning service UUID. Must stay valid until NETWORK_PROV_END. */
+    static const char pop[] = CONFIG_VPRO_PROV_BLE_POP;
+    ESP_LOGI(TAG, "provisioning mode: BLE \"%s\", proof of possession %s", ble_name, pop);
+    ESP_LOGI(TAG, "QR payload: {\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"ble\"}",
+             ble_name, pop);
+    ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1, (const void *)pop,
+                                                        ble_name, NULL));
 
     int64_t deadline = esp_timer_get_time() + (int64_t)PROV_TIMEOUT_S * 1000000;
     while (!s_done && esp_timer_get_time() < deadline) {

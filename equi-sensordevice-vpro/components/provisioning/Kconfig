@@ -1,0 +1,11 @@
+menu "VPro Wi-Fi provisioning"
+
+    config VPRO_PROV_BLE_POP
+        string "BLE proof of possession"
+        default "abc1234"
+        help
+            Security 1 proof of possession for BLE provisioning (network_provisioning BLE
+            scheme, device name "EQUI_<backend id>"). The VPro app uses "abc1234", as the
+            original VPro firmware.
+
+endmenu

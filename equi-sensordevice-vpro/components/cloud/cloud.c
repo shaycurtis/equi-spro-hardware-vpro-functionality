@@ -4,6 +4,7 @@
 #include "cloud.h"
 
 #include <dirent.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,37 +79,120 @@ static esp_err_t wifi_init(void)
     return esp_wifi_set_mode(WIFI_MODE_STA);
 }
 
-/* Try the saved networks, newest first. */
+#define SCAN_MAX_APS 20   /* scan records kept (heap); the rest are ignored */
+
+typedef struct {
+    int index;    /* in the saved list (prov_network_get) */
+    int rssi;     /* best seen, or INT_MIN when not seen */
+    int tries;
+} try_t;
+
+/* One blocking all-channel scan, then the try order: saved networks seen in the scan, strongest
+ * first, CONNECT_TRIES each; then the ones not seen (maybe a hidden SSID), one try each. If the
+ * scan fails: every network newest first, CONNECT_TRIES each (as before). Returns the count. */
+static int plan_tries(try_t order[PROV_MAX_NETWORKS])
+{
+    int n = prov_network_count();
+    if (n > PROV_MAX_NETWORKS) {
+        n = PROV_MAX_NETWORKS;
+    }
+    for (int i = 0; i < n; i++) {
+        order[i] = (try_t){ .index = i, .rssi = INT_MIN, .tries = CONNECT_TRIES };
+    }
+    wifi_scan_config_t sc = { 0 };   /* all channels, active scan, hidden SSIDs not listed */
+    uint16_t found = 0;
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
+    if (err == ESP_OK) {
+        err = esp_wifi_scan_get_ap_num(&found);
+    }
+    uint16_t nrec = found < SCAN_MAX_APS ? found : SCAN_MAX_APS;
+    wifi_ap_record_t *recs = NULL;
+    if (err == ESP_OK && nrec > 0) {
+        recs = calloc(nrec, sizeof(*recs));
+        err = recs ? esp_wifi_scan_get_ap_records(&nrec, recs) : ESP_ERR_NO_MEM;
+    }
+    if (err != ESP_OK) {
+        esp_wifi_clear_ap_list();   /* frees the driver's list (no-op if empty) */
+        free(recs);
+        ESP_LOGW(TAG, "scan failed (%s): trying the saved networks newest first", esp_err_to_name(err));
+        return n;
+    }
+    if (!recs) {
+        esp_wifi_clear_ap_list();   /* nothing found: free the driver's list */
+    }
+    for (int i = 0; i < n; i++) {
+        char ssid[33], pass[65];
+        if (!prov_network_get(order[i].index, ssid, pass)) {
+            continue;
+        }
+        for (int r = 0; r < nrec; r++) {
+            if (strcmp((const char *)recs[r].ssid, ssid) == 0 && recs[r].rssi > order[i].rssi) {
+                order[i].rssi = recs[r].rssi;
+            }
+        }
+        order[i].tries = order[i].rssi == INT_MIN ? 1 : CONNECT_TRIES;
+    }
+    free(recs);
+    /* Seen first, strongest first; not seen after, newest first (stable insertion sort). */
+    for (int i = 1; i < n; i++) {
+        try_t t = order[i];
+        int j = i - 1;
+        while (j >= 0 && order[j].rssi < t.rssi) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = t;
+    }
+    ESP_LOGI(TAG, "scan: %u access point(s); try order:", found);
+    for (int i = 0; i < n; i++) {
+        char ssid[33], pass[65];
+        if (!prov_network_get(order[i].index, ssid, pass)) {
+            continue;
+        }
+        if (order[i].rssi == INT_MIN) {
+            ESP_LOGI(TAG, "  %d. \"%s\" not seen (hidden?), %d try", i + 1, ssid, order[i].tries);
+        } else {
+            ESP_LOGI(TAG, "  %d. \"%s\" %d dBm, %d tries", i + 1, ssid, order[i].rssi, order[i].tries);
+        }
+    }
+    return n;
+}
+
+/* Scan, then try the saved networks in range, strongest first (see plan_tries). */
 static bool wifi_connect(void)
 {
     if (esp_wifi_start() != ESP_OK) {
         return false;
     }
-    int n = prov_network_count();
-    for (int k = 0; k < n * CONNECT_TRIES; k++) {
-        int i = k / CONNECT_TRIES;
+    try_t order[PROV_MAX_NETWORKS];
+    int n = plan_tries(order);
+    for (int o = 0; o < n; o++) {
         char ssid[33], pass[65];
-        if (!prov_network_get(i, ssid, pass)) {
-            break;
+        if (!prov_network_get(order[o].index, ssid, pass)) {
+            continue;
         }
-        wifi_config_t wc = { 0 };
-        strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
-        strlcpy((char *)wc.sta.password, pass, sizeof(wc.sta.password));
-        wc.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-        esp_wifi_set_config(WIFI_IF_STA, &wc);
-        xEventGroupClearBits(s_ev, BIT_GOT_IP | BIT_FAILED);
-        ESP_LOGI(TAG, "connecting to \"%s\" (try %d of %d)...", ssid, k % CONNECT_TRIES + 1, CONNECT_TRIES);
-        esp_wifi_connect();
-        EventBits_t b = xEventGroupWaitBits(s_ev, BIT_GOT_IP | BIT_FAILED, pdTRUE, pdFALSE,
-                                            pdMS_TO_TICKS(CONNECT_TIMEOUT_MS));
-        if (b & BIT_GOT_IP) {
-            strlcpy(s_ssid, ssid, sizeof(s_ssid));
-            ESP_LOGI(TAG, "connected to \"%s\"", ssid);
-            return true;
+        for (int t = 0; t < order[o].tries; t++) {
+            wifi_config_t wc = { 0 };
+            strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
+            strlcpy((char *)wc.sta.password, pass, sizeof(wc.sta.password));
+            wc.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+            wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;        /* as VPro: the strongest AP */
+            wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;    /* when several share the SSID */
+            esp_wifi_set_config(WIFI_IF_STA, &wc);
+            xEventGroupClearBits(s_ev, BIT_GOT_IP | BIT_FAILED);
+            ESP_LOGI(TAG, "connecting to \"%s\" (try %d of %d)...", ssid, t + 1, order[o].tries);
+            esp_wifi_connect();
+            EventBits_t b = xEventGroupWaitBits(s_ev, BIT_GOT_IP | BIT_FAILED, pdTRUE, pdFALSE,
+                                                pdMS_TO_TICKS(CONNECT_TIMEOUT_MS));
+            if (b & BIT_GOT_IP) {
+                strlcpy(s_ssid, ssid, sizeof(s_ssid));
+                ESP_LOGI(TAG, "connected to \"%s\"", ssid);
+                return true;
+            }
+            ESP_LOGW(TAG, "\"%s\": %s", ssid, (b & BIT_FAILED) ? "failed" : "timed out");
+            esp_wifi_disconnect();
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
-        ESP_LOGW(TAG, "\"%s\": %s", ssid, (b & BIT_FAILED) ? "failed" : "timed out");
-        esp_wifi_disconnect();
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
     esp_wifi_stop();
     return false;

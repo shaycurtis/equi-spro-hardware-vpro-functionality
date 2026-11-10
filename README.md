@@ -26,7 +26,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Toolchain, secure boot, flash encryption | ✅ IDF 6.1, signed with the **spro** key, app-only encrypted flashing |
 | Power sequencing | ✅ Hold to power on (~1.5 s), long press to power off (2 s), charge-only on USB (light sleep, no reboots) |
 | LEDs | ✅ D1 short blue blink every 5 s while on; D2 shows charge state (red/green/orange); both blink green while waiting for an RFID tag. Off on USB (charge-only): **D1 = charge**, **D2 = Wi-Fi / upload** (see Use, step 6). Purple is reserved for OTA updates |
-| Wi-Fi provisioning | ✅ Espressif `network_provisioning` (SoftAP, security 1), **ESP SoftAP Provisioning** app; per-device setup code; up to 5 saved networks in NVS |
+| Wi-Fi provisioning | ✅ Espressif `network_provisioning` over **BLE** (security 1, PoP `abc1234`, name `EQUI_<id>`), as VPro: verified 2026-11-10 with the **VPro app** and the ESP BLE Provisioning app. Uses a patched copy of IDF's protocomm (extended advertising). Up to 5 saved networks in NVS; SoftAP provisioning removed |
 | Sensors (60 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer; each reading sends the steps since the previous one, so a missed reading loses its steps), RTC (PCF85063A) |
 | GPS | ✅ Parked in backup mode at boot (`$PAIR650,0`, verified) |
 | BLE telemetry | ✅ Advert v6 every 60 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, horse position, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
@@ -59,8 +59,10 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
    - **D2 = Wi-Fi / upload:** blue blinking = connecting, blue breathing = uploading recordings,
      steady blue = connected and everything sent, **orange flash every 5 s** = Wi-Fi or upload
      failed (retrying). No Wi-Fi saved: D2 shows the charge colour too.
-   - Retries while charging: each saved network twice per round (30 s per try); a failed round again after 30 s,
-     1 min, 2 min, then every 5 min; recordings still on the card after 1 min; otherwise every 10 min.
+   - Connecting while charging: one Wi-Fi scan, then the saved networks **in range, strongest first**
+     (twice each, 30 s per try), then any saved network not seen (maybe a hidden SSID, once each). A
+     failed round again after 30 s, 1 min, 2 min, then every 5 min; recordings still on the card after
+     1 min; otherwise every 10 min.
 7. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white.
 
 ### SD card recording
@@ -167,23 +169,32 @@ existing **Equimetrics app** works unchanged. Details: `components/telemetry/liv
 
 ### Wi-Fi provisioning
 
-Official Espressif flow, nothing custom: the `espressif/network_provisioning` component (SoftAP scheme,
-security 1) with Espressif's **ESP SoftAP Provisioning** app (iOS / Android).
+Official Espressif flow, as the original VPro firmware: the `espressif/network_provisioning` component
+(BLE scheme, security 1) with the **VPro app**, or Espressif's **ESP BLE Provisioning** app (iOS / Android).
 
-- The device opens a 2.4 GHz access point **`PROV_<device id>`** (e.g. `PROV_15B0B4`). Its WPA2 password
-  and the app's proof of possession are the same per-device **setup code**: the first 8 hex digits of
-  SHA-256(fleet key | "EQ-POP" | device id). `python tools/setup_code.py 15B0B4` prints it and the
-  app's QR payload (needs `private/fleet_key.bin`).
-- In the app: Provision Device → "I don't have a QR code" → join `PROV_…` → enter the code → pick the
-  network. Both LEDs **flash white** while the device connects; a wrong password / missing network goes
+- The device advertises as **`EQUI_<backend id>`** (e.g. `EQUI_CCBA97FFFE236B2C`, the same name and
+  Bluetooth address as the normal session) with the default provisioning service
+  `1775244d-6b43-439b-877c-060f2d9bed07`. Proof of possession **`abc1234`**
+  (`CONFIG_VPRO_PROV_BLE_POP`, as VPro).
+- ESP BLE Provisioning app: Provision Device → "I don't have a QR code" → pick `EQUI_…` → PoP
+  `abc1234` → pick the network.
+- **Why protocomm is overridden:** IDF v6.1's `protocomm_nimble` advertises with NimBLE's legacy API,
+  which returns `BLE_HS_ENOTSUP` when `CONFIG_BT_NIMBLE_EXT_ADV=y` (needed for the two telemetry
+  advertising sets), so BLE provisioning would start but never advertise.
+  `equi-sensordevice-vpro/components/protocomm/` is an unchanged copy of IDF v6.1's protocomm (a
+  project component overrides the IDF one of the same name) with only the advertising start/stop
+  ported to the extended-advertising API (legacy PDUs). See its `PATCHED.md`.
+- SoftAP provisioning (ESP SoftAP Provisioning app, per-device setup code) was used until 2026-11-10
+  and has been removed; it is in git history (commit 903b634 and earlier).
+- Both LEDs **flash white** while the device connects; a wrong password / missing network goes
   back to steady white for the app to retry.
 - Success: the network is saved (NVS `vpro`/`wifi_nets`, up to 5, newest first) and the device **powers
   off** with the LEDs dark (on USB, charge-only then shows the charge colour). The next power-on is a
   normal session.
 - Exit without finishing: hold the power button 2 s. A device that already has a network then starts
   normally next time; one with none stays locked. Provisioning mode times out after 10 min (power off).
-- The saved networks are for the Wi-Fi-while-charging work (time, backend check-in, OTA, uploads):
-  not used yet.
+- The saved networks are used by the Wi-Fi-while-charging work (time, backend, uploads): scan first,
+  then the ones in range, strongest first.
 
 ## Build and flash (device firmware)
 
@@ -289,6 +300,9 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 - **BLE controller activities:** `CONFIG_BT_CTRL_BLE_MAX_ACT` was 3; two connectable advertising sets
   (telemetry + app) plus a connection exceed it and the telemetry bursts failed (`rc=519`). Now 8, with
   `CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=2`.
+- **protocomm is overridden** (`equi-sensordevice-vpro/components/protocomm/`, from IDF v6.1) so BLE
+  provisioning advertises with extended advertising on. After an IDF upgrade, re-copy it from the new
+  IDF and re-apply the patch in its `PATCHED.md`, or delete the folder once Espressif fixes it upstream.
 - **iOS caches a device's name per address** and the app uses the cached one: after a name change the
   phone kept showing the old name. Bump `BLE_ADDR_OFFSET` so phones see a new device.
 - **No GATT client:** the central role is off, so the device can't start an MTU exchange; the app does.
@@ -345,6 +359,10 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 2. **Wi-Fi while charging, next:** ECG upload works (check the recording appears in the app); then
    the upload progress in the charging report (`fileProgress`), the device event log, firmware check
    + remote `setup` (config). Reflash 15B0B4 for the 16-digit ID.
+   BLE provisioning (verified 2026-11-10 with both apps) still to check on hardware: wrong
+   password / unknown SSID retry, power-button / timeout / both-buttons exits, live ECG + gateway
+   telemetry after a provisioning boot, a hidden SSID in the scan order. File the protocomm issue
+   upstream (draft in the session notes).
 3. ~~BLE bond store~~ **fixed 2026-11-10:** `ble_store_config_write_local_irk rc=27` was NimBLE's
    single local-IRK slot holding the IRK of an old BLE address (after a `BLE_ADDR_OFFSET` change).
    `telemetry_ble_init` now deletes local IRKs of other addresses before the host starts; bonds

@@ -102,6 +102,11 @@ typedef struct {
 
 void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN]);
 
+/* Set the Bluetooth address (the chip's BT MAC + an offset, as VPro). Call before NimBLE starts;
+ * telemetry_ble_init() does, and so does BLE provisioning, so both use the same address. Copies
+ * the address to `mac_out` (may be NULL). False if the MAC could not be read. */
+bool telemetry_ble_set_address(uint8_t mac_out[6]);
+
 /* BLE: start NimBLE (device name e.g. "EQUI_15B0B4"). Non-blocking. */
 esp_err_t telemetry_ble_init(const char *name);
 

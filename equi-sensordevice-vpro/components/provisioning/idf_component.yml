@@ -1,4 +1,5 @@
 dependencies:
-  # Wi-Fi provisioning (SoftAP, works with Espressif's "ESP SoftAP Provisioning" app). Moved out of
-  # ESP-IDF in v6.0. Official component, used unmodified (SoftAP scheme).
+  # Wi-Fi provisioning over BLE (the VPro app / Espressif's "ESP BLE Provisioning" app). Moved out
+  # of ESP-IDF in v6.0. Official component, used unmodified (BLE scheme; protocomm is patched, see
+  # components/protocomm/PATCHED.md).
   espressif/network_provisioning: "^1.0.0"

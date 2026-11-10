@@ -3638,6 +3638,13 @@ CONFIG_WL_SECTOR_SIZE=4096
 # end of Wear Levelling
 
 #
+# VPro Wi-Fi provisioning
+#
+# default:
+CONFIG_VPRO_PROV_BLE_POP="abc1234"
+# end of VPro Wi-Fi provisioning
+
+#
 # cJSON
 #
 # default:

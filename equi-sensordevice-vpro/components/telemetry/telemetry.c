@@ -366,17 +366,27 @@ static void drop_stale_local_irks(const uint8_t mac[6])
     }
 }
 
-esp_err_t telemetry_ble_init(const char *name)
+bool telemetry_ble_set_address(uint8_t mac_out[6])
 {
     /* As the VPro firmware: Bluetooth address = the chip's BT MAC + 1. Its comment: a
      * workaround for iOS caching (a new address makes iOS see a new device). esp_read_mac()
      * returns the eFuse-derived address, so this is the same on every boot. */
     uint8_t mac[6] = { 0 };
-    bool have_mac = esp_read_mac(mac, ESP_MAC_BT) == ESP_OK;
-    if (have_mac) {
-        mac[5] += BLE_ADDR_OFFSET;
-        esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+    if (esp_read_mac(mac, ESP_MAC_BT) != ESP_OK) {
+        return false;
     }
+    mac[5] += BLE_ADDR_OFFSET;
+    esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+    if (mac_out) {
+        memcpy(mac_out, mac, 6);
+    }
+    return true;
+}
+
+esp_err_t telemetry_ble_init(const char *name)
+{
+    uint8_t mac[6] = { 0 };
+    bool have_mac = telemetry_ble_set_address(mac);
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init: %s", esp_err_to_name(err));

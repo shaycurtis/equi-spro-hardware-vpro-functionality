@@ -185,7 +185,7 @@ static bool identity_delivered(void)
 static void show_status_led(void)
 {
     if (!identity_delivered()) {
-        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_SOLID, LED_BLUE);
+        status_led_set_mode(LED_IDX_STATUS, LED_MODE_SOLID, LED_BLUE);
     } else {
         status_led_set_mode(LED_IDX_STATUS, LED_MODE_PULSE,
                             telemetry_gateway_seen(GATEWAY_SEEN_MS) ? LED_LINKED : LED_RUNNING);
@@ -539,8 +539,14 @@ void app_main(void)
 
     s_dev_id = strtoul(device_id_get(), NULL, 16) & 0xFFFFFF;
     gnss_standby_async();
+
+    char name[24];
+    /* "EQUI_" + the device ID, as VPro's BOARD_HOSTNAME_PREFIX + ID. The Equimetrics app only
+     * connects to IDs registered in the backend (the devices record for "15B0B4"). Also the BLE
+     * provisioning name, as on VPro. */
+    snprintf(name, sizeof(name), "EQUI_%s", device_id_backend_get());   /* the app needs the full ID */
     if (prov_required() || power_boot_prov_gesture()) {
-        prov_run(s_dev_id);                /* locked until Wi-Fi is set up; restarts when done */
+        prov_run(name);                    /* locked until Wi-Fi is set up; powers off when done */
     }
     ESP_ERROR_CHECK(sensors_init());
     power_register_shutdown_cb(sensors_shutdown);
@@ -554,10 +560,6 @@ void app_main(void)
     /* SD recording starts with the session; its hook runs before the card is unmounted. */
     power_register_shutdown_cb(recorder_shutdown);
 
-    char name[24];
-    /* "EQUI_" + the device ID, as VPro's BOARD_HOSTNAME_PREFIX + ID. The Equimetrics app only
-     * connects to IDs registered in the backend (the devices record for "15B0B4"). */
-    snprintf(name, sizeof(name), "EQUI_%s", device_id_backend_get());   /* the app needs the full ID */
     ESP_ERROR_CHECK(telemetry_ble_init(name));   /* identity is published when the session starts */
     telemetry_set_recording_hooks(app_rec_start, app_rec_stop);
     power_register_shutdown_cb(telemetry_ble_stop);
