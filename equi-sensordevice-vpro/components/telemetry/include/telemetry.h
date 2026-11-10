@@ -7,7 +7,7 @@
  * with company ID 0xFFFF (Bluetooth SIG "test / not assigned" - replace with an Equimetrics
  * company ID for production).
  *
- * ADVERT - live data, every 60 s (21 bytes after the company ID, little-endian unless noted):
+ * ADVERT - live data, every 60 s (23 bytes after the company ID, little-endian unless noted):
  *   off len field
  *    0   1  magic        0xE9
  *    1   1  version      0x06
@@ -29,7 +29,10 @@
  *                        2 sternal, 3 rolling, 4 standing, 5 moving): bits 0-2 = position now;
  *                        bits 3-7 = positions held since the last reading (bit 3 lateral,
  *                        4 sternal, 5 rolling, 6 standing, 7 moving). 0 = n/a
- *  (3 bytes spare in the 31-byte advert)
+ *   21   2  horse_temp   int16, 0.01 degC, external DS18B20 probe on the 1-Wire connector pin,
+ *                        0x7FFF = no probe. Optional: added to v6 without a version change, so
+ *                        decoders that read 21 bytes still work; firmware before it sends 21
+ *  (1 byte spare in the 31-byte advert)
  *  v5 = v6 without position. v4 = v5 with a 4-byte session ID at offset 5 and everything after shifted by 3. v3 = v4 without
  *  heart_rate. v2 = v3 with battery_soc as 1 byte of whole %.
  *
@@ -56,7 +59,7 @@
 #define TELEMETRY_COMPANY_ID   0xFFFF
 #define TELEMETRY_MAGIC        0xE9
 #define TELEMETRY_VERSION      6
-#define TELEMETRY_PAYLOAD_LEN  21
+#define TELEMETRY_PAYLOAD_LEN  23
 #define TELEMETRY_IDENTITY     0x83
 #define TELEMETRY_IDENTITY_LEN 27
 
@@ -98,6 +101,7 @@ typedef struct {
     uint8_t  heart_rate;       /* bpm, 0 = n/a */
     uint8_t  position;         /* 0..5 (VPro numbering), 0 = unknown */
     uint8_t  positions_seen;   /* bit n = position n held since the last reading */
+    int16_t  horse_temp_c100;  /* external probe, 0.01 degC, 0x7FFF = no probe */
 } telemetry_t;
 
 void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN]);

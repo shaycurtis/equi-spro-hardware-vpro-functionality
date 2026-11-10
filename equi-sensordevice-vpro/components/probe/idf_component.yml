@@ -1,0 +1,5 @@
+dependencies:
+  # DS18B20 on the 1-Wire bus (connector pin 4). Official Espressif components, used unmodified.
+  # onewire_bus (RMT backend) is listed too: probe.c uses it directly, and ds18b20 keeps it private.
+  espressif/ds18b20: "^0.4.0"
+  espressif/onewire_bus: "^1.1.2"

@@ -142,8 +142,16 @@ class PostBleDataTest(unittest.TestCase):
     def test_no_heart_rate_is_zero_not_null(self):
         from types import SimpleNamespace
         for hr in (None, 0):
-            m = lam.placeholder_horse_metrics(SimpleNamespace(heart_rate=hr, temp_c=21.5))
+            m = lam.placeholder_horse_metrics(SimpleNamespace(heart_rate=hr, temp_c=21.5, horse_temp_c=None))
             self.assertEqual((m["heartRate"], m["respiration"]), (0, 0))
+
+    def test_horse_temperature_from_probe(self):
+        from decimal import Decimal
+        from types import SimpleNamespace
+        m = lam.placeholder_horse_metrics(SimpleNamespace(heart_rate=40, temp_c=21.5, horse_temp_c=38.12))
+        self.assertEqual(m["horseTemperature"], Decimal("38.12"))       # the probe, not the board
+        m = lam.placeholder_horse_metrics(SimpleNamespace(heart_rate=40, temp_c=21.5, horse_temp_c=None))
+        self.assertEqual(m["horseTemperature"], Decimal("21.50"))       # no probe: board placeholder
 
     def test_shape_matches_create_measurement_data(self):
         # Every key we send must be one the common layer forwards (it drops unknown keys).

@@ -52,7 +52,18 @@ MCU: **ESP32-S3-WROOM-1-N16R8** (U1): 16 MB quad flash, 8 MB octal PSRAM (GPIO35
 - **Quectel LC29H** GNSS (U7), UART, U.FL antenna, always powered from VDD33.
 - **JY-LD6900** RFID reader module, UART TX → GPIO38, power switched by RFID_EN (from V_BATT).
 - microSD (SPI mode), vibration motor, magnetic buzzer, 2x WS2812B-2020.
+- No IR thermometer fitted (the MLX90632 sheet is in the schematics); an external 1-Wire sensor on the magnetic connector takes its place.
 - Buttons: SW1 scan (active low, GPIO6), SW2 power (from V_BATT, read on GPIO4), SW3 boot, SW4 reset.
+
+## 9-pin magnetic connector (MC1, from SPRO.PcbDoc)
+| Pin | Net | Notes |
+|---|---|---|
+| 1 / 2 / 3 | C_ECG_N / C_ECG_VCM / C_ECG_P | ECG electrodes (MAX30001) |
+| 4 | CON_1WIRE | USBLC6-2SC6 (U15) -> ESP_1WIRE (GPIO12), 4.7k pull-up R38 to VDD33 |
+| 5 | CON_3V3 | VDD33 through F1 (PTC, 50 mA hold), C45 100 nF; off when the device is off |
+| 6 / 7 | D1_P / D1_N | CP2102N programming / console |
+| 8 | GND | |
+| 9 | V_USB | 5 V charging input |
 
 ## Power
 - USB 5 V on magnetic connector pin 9 → BQ25303J charger (500 mA set) → Li-ion via J2 (with NTC).

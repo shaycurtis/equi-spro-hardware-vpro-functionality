@@ -28,6 +28,7 @@
 #include "gnss.h"
 #include "board.h"
 #include "power.h"
+#include "probe.h"
 #include "provisioning.h"
 #include "storage.h"
 #include "recorder.h"
@@ -87,6 +88,10 @@ static const char *charge_str(power_charge_t c)
     return n[c];
 }
 
+/* External DS18B20 probe (the horse temperature), read with each sample. */
+static float s_probe_c;
+static bool s_probe_ok;
+
 static void log_sample(const sensor_sample_t *s)
 {
     char batt[48] = "batt n/a", th[32] = "T/RH n/a", steps[24] = "steps n/a", rtc[96] = "rtc n/a";
@@ -110,7 +115,11 @@ static void log_sample(const sensor_sample_t *s)
     if (bpm) {
         snprintf(hr, sizeof(hr), "HR %u bpm (%u beats)", bpm, beats);
     }
-    ESP_LOGI(TAG, "[%s] %s | %s | %s | %s | %s | %s", device_id_get(), batt, th, steps, hr,
+    char probe[24] = "probe n/a";
+    if (s_probe_ok) {
+        snprintf(probe, sizeof(probe), "probe %.2f C", s_probe_c);
+    }
+    ESP_LOGI(TAG, "[%s] %s | %s | %s | %s | %s | %s | %s", device_id_get(), batt, th, probe, steps, hr,
              charge_str(power_charge_state()), rtc);
     if (s->imu_ok) {
         char seen[48] = "";
@@ -459,6 +468,7 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
         .battery_mv = s->fg_ok ? s->batt_mv : 0,
         .temp_c100 = s->th_ok ? (int16_t)lroundf(s->temp_c * 100.0f) : 0x7FFF,
         .humidity_half = s->th_ok ? (uint8_t)lroundf(s->rh * 2.0f) : 0xFF,
+        .horse_temp_c100 = s_probe_ok ? (int16_t)lroundf(s_probe_c * 100.0f) : 0x7FFF,
         .steps = steps,
         .position = s->imu_ok ? s->position : 0,
         .positions_seen = s->imu_ok ? s->positions_seen : 0,
@@ -475,6 +485,7 @@ static void sample_task(void *arg)
     for (;;) {
         sensor_sample_t s;
         sensors_read(&s);
+        s_probe_ok = probe_read(&s_probe_c) == ESP_OK;   /* conversion started a reading ago */
         log_sample(&s);
 
         telemetry_t t;
@@ -550,6 +561,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(sensors_init());
     power_register_shutdown_cb(sensors_shutdown);
+    probe_init();                          /* external DS18B20 on the 1-Wire connector pin */
     if (storage_init() == ESP_OK) {        /* SD card + config.json */
         power_register_shutdown_cb(storage_shutdown);
 #if SD_BOOT_SPEEDTEST
@@ -575,5 +587,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ecg_start(&req));
 #endif
 
-    xTaskCreate(sample_task, "sample", 4096, NULL, 5, NULL);
+    /* Core 0: the probe opens 1-Wire RMT channels each reading, and RMT channels share one
+     * interrupt, which the LEDs' channel (installed from app_main) already holds on core 0. */
+    xTaskCreatePinnedToCore(sample_task, "sample", 4096, NULL, 5, NULL, 0);
 }

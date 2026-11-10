@@ -209,7 +209,9 @@ def placeholder_horse_metrics(t: proto.Telemetry) -> dict:
         "heartRate": hr,
         "respiration": int(round(hr * RESP_PER_HR)),     # placeholder: derived from heart rate
     }
-    if t.temp_c is not None:
+    if t.horse_temp_c is not None:                      # external DS18B20 probe (the real value)
+        out["horseTemperature"] = Decimal(f"{t.horse_temp_c:.2f}")
+    elif t.temp_c is not None:
         out["horseTemperature"] = Decimal(f"{t.temp_c:.2f}")   # placeholder: board temperature
     return out
 

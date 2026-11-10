@@ -8,7 +8,7 @@ Manufacturer Specific Data, company ID 0xFFFF (test ID - replace for production)
   E9 03 ...  telemetry v3 (as v2, battery in 1/256 %) - advert
   E9 04 ...  telemetry v4 (v3 + heart rate)            - advert
   E9 05 ...  telemetry v5 (1-byte session tag)         - advert
-  E9 06 ...  telemetry v6 (v5 + horse position)        - advert
+  E9 06 ...  telemetry v6 (v5 + horse position)        - advert; 23 bytes = + probe temperature
   E9 81 ...  identity v1 (session ID, HorseID, clear) - scan response (older firmware)
   E9 82 ...  identity v2 (AES-CCM, 4-byte session s)   - scan response (older firmware)
   E9 83 ...  identity v3 (AES-CCM, 8-byte session ms)  - scan response, needs the fleet key
@@ -104,6 +104,7 @@ class Telemetry:
     version: int
     position: Optional[str] = None  # v6: one of POSITIONS, the position at the reading; None = older firmware
     positions_seen: Optional[list] = None   # v6: positions held since the last reading (may include position)
+    horse_temp_c: Optional[float] = None    # v6 (23 bytes): external DS18B20 probe, None = no probe / older firmware
 
     def to_record(self) -> dict:
         """Plain dict, the same shape we would later publish to MQTT / AWS."""
@@ -137,7 +138,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
         return None
     kind = payload[1]
     dev = payload[2:5].hex().upper() if len(payload) >= 5 else ""
-    hr = position = seen = None
+    hr = position = seen = horse_temp = None
 
     if kind == 0x83 and len(payload) >= 27:
         if _ccm is None:
@@ -193,6 +194,9 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
             pos = payload[20] & 0x07
             position = POSITIONS[pos] if pos < len(POSITIONS) else POSITIONS[0]
             seen = [POSITIONS[i] for i in range(1, len(POSITIONS)) if payload[20] & (1 << (i + 2))]
+            if len(payload) >= 23:   # optional, appended later: older v6 firmware sends 21 bytes
+                ht, = struct.unpack_from("<h", payload, 21)
+                horse_temp = None if ht == 0x7FFF else ht / 100.0
     elif kind in (3, 4) and len(payload) >= 22:
         session, = struct.unpack_from("<I", payload, 5)
         seq, flags = payload[9], payload[10]
@@ -210,7 +214,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
              battery_mv=None if mv == 0 else mv, temp_c=None if temp == 0x7FFF else temp / 100.0,
              humidity=None if rh_half == 0xFF else rh_half / 2.0,
              steps=None if steps == 0xFFFFFFFF else steps, heart_rate=hr, session=session, session_tag=tag, uptime_min=uptime,
-             version=kind, position=position, positions_seen=seen)
+             version=kind, position=position, positions_seen=seen, horse_temp_c=horse_temp)
     _flags(t, flags)
     return Telemetry(**t)
 
@@ -239,6 +243,11 @@ if __name__ == "__main__":
     assert isinstance(t6, Telemetry) and t6.version == 6 and t6.heart_rate == 41 and t6.steps == 7
     assert t6.position == "standing" and t6.positions_seen == ["lateral", "standing"], t6
     assert decode(bytes([MAGIC, 6]) + p[2:]) is None      # v6 without its position byte
+    assert t6.horse_temp_c is None                        # 21-byte v6: no probe field
+    t6p = decode(bytes([MAGIC, 6]) + p[2:] + bytes([4]) + struct.pack("<h", 3812))
+    assert t6p.horse_temp_c == 38.12 and t6p.position == "standing", t6p
+    assert decode(bytes([MAGIC, 6]) + p[2:] + bytes([4]) + struct.pack("<h", 0x7FFF)).horse_temp_c is None
+    assert decode(bytes([MAGIC, 6]) + p[2:] + bytes([4]) + struct.pack("<h", -125)).horse_temp_c == -1.25
     import os
     set_fleet_key(os.urandom(16))
     hdr = bytes([MAGIC, 0x82, 0x15, 0xB0, 0xB4]) + os.urandom(4)

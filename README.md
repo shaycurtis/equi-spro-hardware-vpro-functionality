@@ -29,13 +29,14 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Wi-Fi provisioning | ✅ Espressif `network_provisioning` over **BLE** (security 1, PoP `abc1234`, name `EQUI_<id>`), as VPro: verified 2026-11-10 with the **VPro app** and the ESP BLE Provisioning app. Uses a patched copy of IDF's protocomm (extended advertising). Up to 5 saved networks in NVS; SoftAP provisioning removed |
 | Sensors (60 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer; each reading sends the steps since the previous one, so a missed reading loses its steps), RTC (PCF85063A) |
 | GPS | ✅ Parked in backup mode at boot (`$PAIR650,0`, verified) |
-| BLE telemetry | ✅ Advert v6 every 60 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, horse position, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
+| BLE telemetry | ✅ Advert v6 every 60 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, horse position, probe temperature, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
 | Sessions + RFID HorseID | ✅ Session (Unix time **in ms**, as VPro) starts at the tag scan, or scan-button override (chip "Unknown"); JY-LD6900, 9600 ASCII; per-session dashboard view |
 | Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate; with ECG 512 Hz + IMU 416 Hz logging **~28 mA** (≈2.2 days). Parked until the PPK2 is found (see below) |
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 60 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
+| Horse temperature probe | ✅ External **DS18B20** on the connector's 1-Wire pin (see "Temperature probe" below), Espressif's `ds18b20` + `onewire_bus` components, read every 60 s, in advert v6 (2 optional bytes). Verified 2026-11-10 on 15B0B4 (20.88 °C in air, through the gateway and MQTT). Costs ~15 µA. postBleData sends it as `horseTemperature` (**Lambda change written, not uploaded yet**) |
 | Horse position | ✅ From the accelerometer's gravity direction (left / right roll thresholds, no gyro, no extra sensor current), in advert v6 -> `position` / `positionsSeen` (see "Horse position" below). Bench-verified 2026-11-10 on 236B2C, held by hand: standing, lateral, sternal, rolling and moving all reported through the gateway. **Angles not yet tuned on a horse**; not yet tried with SD logging on |
 | SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 256 (default) / 512 Hz per `config.json`, mV (as VPro), interrupt-driven (light sleep kept), 0 overflows |
 | Live ECG + app recordings | ✅ VPro-compatible BLE services (Raw ECG 256 sps, Heart Rate, ECG control); works with the **Equimetrics (VPro) app**; app recordings saved as their own EDF files. App needs a backend-registered **16-digit** ID (see "Device IDs" below); verified with `EQUI_CCBA97FFFE236B2C` |
@@ -133,6 +134,34 @@ The device works out the position itself and sends it in the 60 s advert; postBl
   0.99 -0.05 0.11 g). The log prints the gravity vector and tilt with every reading
   (`position … | roll … | pitch … | gravity x y z g`). The angles are starting values and need tuning from a
   recording on a horse (standing vs sternal is the hard one for a chest sensor).
+
+### Temperature probe (horse temperature)
+
+This board has no IR thermometer (VPro's MLX90632 is not fitted). A **DS18B20** on the 9-pin magnetic
+connector gives the horse temperature instead (`components/probe`, details in `probe.h`):
+
+| Connector pin | Net | DS18B20 |
+|---|---|---|
+| 4 | CON_1WIRE: USBLC6 (U15) -> GPIO12, 4.7k pull-up R38 on the board | DQ (yellow) |
+| 5 | CON_3V3: VDD33 through the 50 mA PTC fuse F1 | VDD (red), powered mode |
+| 8 | GND | GND (black) |
+
+- **Reading:** each 60 s reading collects the conversion started at the previous one and starts the
+  next (12 bits, 0.0625 °C), so the value is up to a minute old. The first reading after boot is
+  n/a. Plugging the probe in or out is detected at every reading (log: `probe: DS18B20 <ROM> on the
+  1-Wire bus` / `probe … gone`).
+- **Power:** ~1 µA standby, 1 mA for <= 750 ms per minute: ~15 µA average (~0.1 % of the drain).
+  VDD33 is off when the device is off. A switch for the rail is not worth it for this sensor (the
+  pull-up would still feed it through DQ); for hungrier external sensors, a 1-Wire switch (e.g.
+  DS2413) in the sensor housing or a load switch on CON_3V3 in a board revision.
+- **Light sleep:** the RMT channels hold a CPU-frequency power lock while they exist, so the bus is
+  opened only for each transfer (a few ms) and the conversion runs while the ESP32 sleeps. The
+  component's own trigger waits 800 ms with the bus open, so the firmware sends the same Convert T
+  bytes through the bus API without waiting.
+- **Core 0:** RMT channels share one interrupt, which the status LEDs' channel holds on core 0, so
+  the sample task is pinned to core 0 (from core 1: `install rx interrupt failed`).
+- **Advert:** int16 0.01 °C at offset 21 (`0x7FFF` = no probe), added to v6 without a version change:
+  decoders that read 21 bytes (the deployed postBleData) keep working.
 
 ### Live ECG with the Equimetrics app (VPro-compatible BLE)
 

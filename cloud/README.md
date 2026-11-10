@@ -26,7 +26,8 @@ Tests (offline, no AWS): `python -m unittest cloud/post_ble_data/test_post_ble_d
 | batteryLevel, temperature, steps | telemetry advert (steps: those of the last 60 s period, as the VPro LoRa device; firmware before v6 sent the total since power-on) |
 | heartRate | telemetry advert; 0 when no beats were counted (never null) |
 | position, positionsSeen | telemetry advert v6 (`horse_position`): the device's position at the reading (`unknown`, `lateral`, `sternal`, `rolling`, `standing`, `moving`, as the LoRa parser) and the other positions held since the previous reading. Firmware before v6: `"standing"`, `[]` |
-| horseTemperature, respiration | **temporary placeholders** for the app's charts (`placeholder_horse_metrics`): board temperature, round(heartRate / 3) |
+| horseTemperature | the external DS18B20 probe (advert v6, 23 bytes); without a probe, or from older firmware: the board temperature (**temporary placeholder**) |
+| respiration | **temporary placeholder** for the app's charts (`placeholder_horse_metrics`): round(heartRate / 3) |
 | status | Charging / Connected / Disconnected from the USB + charging flags |
 | wifiConnected | false (not in the advert) |
 | fPort, perspiration, lat/long | not sent (not measured / LoRa only) |

@@ -39,7 +39,7 @@ Files:
   identity), topic `equimetrics/ble/<thing>/adv`, the postBleData input format.
 
 SQLite tables (`data/telemetry.db`, git-ignored): `readings` (one row per 60 s advert, with
-`device_session`, `horse_id`, `heart_rate`, `position`, `positions_seen`), `device_sessions` (session ID, HorseID, start, last seen),
+`device_session`, `horse_id`, `heart_rate`, `position`, `positions_seen`, `horse_temp` (DS18B20 probe, °C)), `device_sessions` (session ID, HorseID, start, last seen),
 `ecg_captures` (int16 samples, rate, uV/LSB, session, horse).
 
 API: `GET /api/devices`, `/api/sessions?device=`, `/api/readings?device=&hours=|session=`,
