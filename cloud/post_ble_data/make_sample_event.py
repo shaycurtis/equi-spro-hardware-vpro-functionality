@@ -41,9 +41,11 @@ def main():
     session = now - 20 * 60 * 1000                       # a session that started 20 min ago
     tag = session & 0xFF
 
-    # telemetry v5: battery 86.5 %, 3.95 V, 23.10 C, 50 %RH, 850 steps, 38 bpm, on battery
-    p = bytes([proto.MAGIC, 5]) + dev + bytes([tag, 42, proto.FLAG_RTC_VALID])
+    # telemetry v6: battery 86.5 %, 3.95 V, 23.10 C, 50 %RH, 850 steps, 38 bpm, on battery,
+    # standing now (4), moving + standing during the minute
+    p = bytes([proto.MAGIC, 6]) + dev + bytes([tag, 42, proto.FLAG_RTC_VALID])
     p += struct.pack("<HHhB", round(86.5 * 256), 3950, 2310, 50) + struct.pack("<I", 850) + bytes([38])
+    p += bytes([4 | (1 << 6) | (1 << 7)])
     adv = (ad(0x01, b"\x06") + mfg(p)).hex()
 
     # identity v3, encrypted as the firmware does (nonce = device id + 4 random bytes)

@@ -8,6 +8,7 @@ Manufacturer Specific Data, company ID 0xFFFF (test ID - replace for production)
   E9 03 ...  telemetry v3 (as v2, battery in 1/256 %) - advert
   E9 04 ...  telemetry v4 (v3 + heart rate)            - advert
   E9 05 ...  telemetry v5 (1-byte session tag)         - advert
+  E9 06 ...  telemetry v6 (v5 + horse position)        - advert
   E9 81 ...  identity v1 (session ID, HorseID, clear) - scan response (older firmware)
   E9 82 ...  identity v2 (AES-CCM, 4-byte session s)   - scan response (older firmware)
   E9 83 ...  identity v3 (AES-CCM, 8-byte session ms)  - scan response, needs the fleet key
@@ -36,6 +37,9 @@ FLAG_FAULT = 1 << 3
 FLAG_RTC_VALID = 1 << 4
 FLAG_RFID_SCAN = 1 << 5
 FLAG_NO_GATEWAY = 1 << 6   # no trusted gateway heard it lately: connect + write to pair
+
+# Horse position: the VPro platform's list (index = its position number, as in its LoRa parser)
+POSITIONS = ("unknown", "lateral", "sternal", "rolling", "standing", "moving")
 
 SESSION_RANDOM_BIT = 1 << 52      # ms session is random (device RTC had no time), not a timestamp
 SESSION_RANDOM_BIT_S = 1 << 31    # same, for older firmware's seconds session IDs
@@ -91,13 +95,15 @@ class Telemetry:
     battery_mv: Optional[int]
     temp_c: Optional[float]
     humidity: Optional[float]       # %RH
-    steps: Optional[int]
+    steps: Optional[int]            # v6: since the previous reading; older: total since power-on
     heart_rate: Optional[int]       # bpm (v4+), None = no beats / older firmware
     session: Optional[int]          # v2-v4: Unix time the session started (bit 31 = random);
                                     # v5: filled in by the gateway from the identity (else None)
     session_tag: Optional[int]      # v5: low byte of the session ID
     uptime_min: Optional[int]       # v1 only
     version: int
+    position: Optional[str] = None  # v6: one of POSITIONS, the position at the reading; None = older firmware
+    positions_seen: Optional[list] = None   # v6: positions held since the last reading (may include position)
 
     def to_record(self) -> dict:
         """Plain dict, the same shape we would later publish to MQTT / AWS."""
@@ -131,7 +137,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
         return None
     kind = payload[1]
     dev = payload[2:5].hex().upper() if len(payload) >= 5 else ""
-    hr = None
+    hr = position = seen = None
 
     if kind == 0x83 and len(payload) >= 27:
         if _ccm is None:
@@ -175,7 +181,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
         rh_half = payload[16]
         steps, = struct.unpack_from("<I", payload, 17)
         uptime = None
-    elif kind == 5 and len(payload) >= 20:
+    elif (kind == 5 and len(payload) >= 20) or (kind == 6 and len(payload) >= 21):
         tag, seq, flags = payload[5], payload[6], payload[7]
         soc256, mv, temp = struct.unpack_from("<HHh", payload, 8)
         soc = 0xFF if soc256 == 0xFFFF else round(soc256 / 256.0, 3)
@@ -183,6 +189,10 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
         steps, = struct.unpack_from("<I", payload, 15)
         hr = payload[19] or None
         session = uptime = None
+        if kind == 6:
+            pos = payload[20] & 0x07
+            position = POSITIONS[pos] if pos < len(POSITIONS) else POSITIONS[0]
+            seen = [POSITIONS[i] for i in range(1, len(POSITIONS)) if payload[20] & (1 << (i + 2))]
     elif kind in (3, 4) and len(payload) >= 22:
         session, = struct.unpack_from("<I", payload, 5)
         seq, flags = payload[9], payload[10]
@@ -200,7 +210,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
              battery_mv=None if mv == 0 else mv, temp_c=None if temp == 0x7FFF else temp / 100.0,
              humidity=None if rh_half == 0xFF else rh_half / 2.0,
              steps=None if steps == 0xFFFFFFFF else steps, heart_rate=hr, session=session, session_tag=tag, uptime_min=uptime,
-             version=kind)
+             version=kind, position=position, positions_seen=seen)
     _flags(t, flags)
     return Telemetry(**t)
 
@@ -223,6 +233,12 @@ if __name__ == "__main__":
     t5 = decode(p)
     assert isinstance(t5, Telemetry) and t5.version == 5 and t5.session is None and t5.heart_rate == 41
     assert t5.session_tag == 1794100000 & 0xFF and t5.steps == 7 and t5.battery_mv == 3900, t5
+    assert t5.position is None and t5.positions_seen is None
+    # v6 = v5 + position byte: standing now (4), lateral and standing held during the minute
+    t6 = decode(bytes([MAGIC, 6]) + p[2:] + bytes([4 | (1 << 3) | (1 << 6)]))
+    assert isinstance(t6, Telemetry) and t6.version == 6 and t6.heart_rate == 41 and t6.steps == 7
+    assert t6.position == "standing" and t6.positions_seen == ["lateral", "standing"], t6
+    assert decode(bytes([MAGIC, 6]) + p[2:]) is None      # v6 without its position byte
     import os
     set_fleet_key(os.urandom(16))
     hdr = bytes([MAGIC, 0x82, 0x15, 0xB0, 0xB4]) + os.urandom(4)

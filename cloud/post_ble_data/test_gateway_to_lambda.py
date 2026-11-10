@@ -28,8 +28,9 @@ HORSE = "999012345678436"
 
 
 def telemetry(seq, tag=SESSION & 0xFF):
-    p = bytes([proto.MAGIC, 5]) + DEV + bytes([tag, seq, proto.FLAG_RTC_VALID])
-    return p + struct.pack("<HHhB", round(80 * 256), 3900, 2250, 48) + struct.pack("<I", 77) + bytes([44])
+    p = bytes([proto.MAGIC, 6]) + DEV + bytes([tag, seq, proto.FLAG_RTC_VALID])
+    p += struct.pack("<HHhB", round(80 * 256), 3900, 2250, 48) + struct.pack("<I", 77) + bytes([44])
+    return p + bytes([2 | (1 << 4) | (1 << 6)])      # sternal now; sternal + standing during the minute
 
 
 def identity():
@@ -82,6 +83,7 @@ class GatewayToLambda(unittest.TestCase):
         self.assertEqual(b["sessionId"], SESSION)            # identity carried over to burst 2
         self.assertEqual(b["signalStrength"], "medium")      # best of -75 / -73
         self.assertEqual((a["deviceId"], a["heartRate"], a["steps"], a["batteryLevel"]), ("50787DFFFE15B0B4", 44, 77, 80))
+        self.assertEqual((a["position"], a["positionsSeen"]), ("sternal", ["standing"]))
 
 
 if __name__ == "__main__":

@@ -1,16 +1,16 @@
 #pragma once
 /*
- * Telemetry adverts, format version 5.
+ * Telemetry adverts, format version 6.
  *
  * Sent as BLE legacy, connectable advertising (1M PHY) so any scanner or commercial
  * listen-only gateway can forward it. Both records are Manufacturer Specific Data (type 0xFF)
  * with company ID 0xFFFF (Bluetooth SIG "test / not assigned" - replace with an Equimetrics
  * company ID for production).
  *
- * ADVERT - live data, every 60 s (20 bytes after the company ID, little-endian unless noted):
+ * ADVERT - live data, every 60 s (21 bytes after the company ID, little-endian unless noted):
  *   off len field
  *    0   1  magic        0xE9
- *    1   1  version      0x05
+ *    1   1  version      0x06
  *    2   3  device_id    24-bit, BIG-endian (so 0x15B0B4 reads as "15B0B4")
  *    5   1  session_tag  low byte of the session ID: tells the gateway which session (from the
  *                        encrypted identity below) this reading belongs to
@@ -22,10 +22,15 @@
  *   10   2  battery_mv   mV, 0 = n/a
  *   12   2  temp         int16, 0.01 degC, 0x7FFF = n/a
  *   14   1  humidity     0.5 %RH steps (0..200), 0xFF = n/a
- *   15   4  steps        uint32 since power-on, 0xFFFFFFFF = n/a
+ *   15   4  steps        uint32, steps since the previous reading (the first reading: since
+ *                        power-on), 0xFFFFFFFF = n/a. v5 and older: total since power-on
  *   19   1  heart_rate   bpm over the last 60 s (MAX30001 R-to-R, median), 0 = no beats
- *  (4 bytes spare in the 31-byte advert)
- *  v4 = 4-byte session ID at offset 5 and everything after shifted by 3. v3 = v4 without
+ *   20   1  position     horse position, the VPro platform's numbering (0 unknown, 1 lateral,
+ *                        2 sternal, 3 rolling, 4 standing, 5 moving): bits 0-2 = position now;
+ *                        bits 3-7 = positions held since the last reading (bit 3 lateral,
+ *                        4 sternal, 5 rolling, 6 standing, 7 moving). 0 = n/a
+ *  (3 bytes spare in the 31-byte advert)
+ *  v5 = v6 without position. v4 = v5 with a 4-byte session ID at offset 5 and everything after shifted by 3. v3 = v4 without
  *  heart_rate. v2 = v3 with battery_soc as 1 byte of whole %.
  *
  * SCAN RESPONSE - encrypted identity (27 bytes after the company ID; the whole 31-byte scan
@@ -50,8 +55,8 @@
 
 #define TELEMETRY_COMPANY_ID   0xFFFF
 #define TELEMETRY_MAGIC        0xE9
-#define TELEMETRY_VERSION      5
-#define TELEMETRY_PAYLOAD_LEN  20
+#define TELEMETRY_VERSION      6
+#define TELEMETRY_PAYLOAD_LEN  21
 #define TELEMETRY_IDENTITY     0x83
 #define TELEMETRY_IDENTITY_LEN 27
 
@@ -89,8 +94,10 @@ typedef struct {
     uint16_t battery_mv;
     int16_t  temp_c100;
     uint8_t  humidity_half;
-    uint32_t steps;
+    uint32_t steps;            /* since the previous reading */
     uint8_t  heart_rate;       /* bpm, 0 = n/a */
+    uint8_t  position;         /* 0..5 (VPro numbering), 0 = unknown */
+    uint8_t  positions_seen;   /* bit n = position n held since the last reading */
 } telemetry_t;
 
 void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN]);

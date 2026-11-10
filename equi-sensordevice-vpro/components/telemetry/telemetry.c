@@ -72,6 +72,7 @@ void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN])
     out[14] = t->humidity_half;
     put32(&out[15], t->steps);
     out[19] = t->heart_rate;
+    out[20] = (uint8_t)((t->position & 0x07) | ((t->positions_seen >> 1) << 3));
 }
 
 /* ------------------------------------------------------------ fleet key */

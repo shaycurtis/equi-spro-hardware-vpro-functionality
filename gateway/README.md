@@ -31,7 +31,7 @@ estimate** in mA and runtime), a **Sessions** strip
 **ECG on demand** panel (needs `--serial`; the device is contacted at its next advert, up to 60 s).
 
 Files:
-- `equi_protocol.py`: advert decoder (telemetry v1-v5 + identity v1-v3), mirrors `components/telemetry/include/telemetry.h`.
+- `equi_protocol.py`: advert decoder (telemetry v1-v6 + identity v1-v3), mirrors `components/telemetry/include/telemetry.h`.
 - `gateway.py`: receiver loop, de-duplication, SQLite, sessions, automatic device time sync.
 - `ecg_manager.py`: on-demand ECG via the receiver (request, reassembly, storage).
 - `webapp.py`: JSON API + `static/index.html`.
@@ -39,7 +39,7 @@ Files:
   identity), topic `equimetrics/ble/<thing>/adv`, the postBleData input format.
 
 SQLite tables (`data/telemetry.db`, git-ignored): `readings` (one row per 60 s advert, with
-`device_session`, `horse_id`, `heart_rate`), `device_sessions` (session ID, HorseID, start, last seen),
+`device_session`, `horse_id`, `heart_rate`, `position`, `positions_seen`), `device_sessions` (session ID, HorseID, start, last seen),
 `ecg_captures` (int16 samples, rate, uV/LSB, session, horse).
 
 API: `GET /api/devices`, `/api/sessions?device=`, `/api/readings?device=&hours=|session=`,

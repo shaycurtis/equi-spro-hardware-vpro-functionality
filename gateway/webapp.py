@@ -172,22 +172,29 @@ def api_readings(db: Path, device: str, hours: float, session: int | None = None
     if bucket <= SAMPLE_PERIOD_S:
         rows = query(db, f"""
             SELECT {EPOCH} AS t, battery_soc AS soc, battery_mv AS mv, temp_c AS temp, humidity AS rh,
-                   steps, rssi_best AS rssi, packets, usb, charging, charge_full, heart_rate AS hr
+                   steps, rssi_best AS rssi, packets, usb, charging, charge_full, heart_rate AS hr,
+                   position IS NOT NULL AS per_period, steps AS steps_sum
             FROM readings WHERE {where} ORDER BY id""", args)
     else:
         rows = query(db, f"""
             SELECT MIN({EPOCH}) AS t, AVG(battery_soc) AS soc, AVG(battery_mv) AS mv, AVG(temp_c) AS temp,
                    AVG(humidity) AS rh, MAX(steps) AS steps, AVG(rssi_best) AS rssi, AVG(packets) AS packets,
                    MAX(usb) AS usb, MAX(charging) AS charging, MAX(charge_full) AS charge_full,
-                   AVG(heart_rate) AS hr
+                   AVG(heart_rate) AS hr, MAX(position IS NOT NULL) AS per_period, SUM(steps) AS steps_sum
             FROM readings WHERE {where}
             GROUP BY {EPOCH} / ? ORDER BY t""", args + (bucket,))
-    # Steps per interval: the counter restarts at each power-on, so treat a drop as a reset.
+    # Steps per interval. Advert v6 (rows with a position) sends the steps of each reading's own
+    # period: add them up. Older firmware sends a counter that restarts at each power-on, so
+    # take differences and treat a drop as a reset.
     prev = None
     for r in rows:
         s = r["steps"]
         if s is None:
             r["steps_delta"] = None
+            continue
+        if r["per_period"]:
+            r["steps_delta"] = r["steps_sum"]
+            prev = None
             continue
         if prev is None:
             r["steps_delta"] = 0

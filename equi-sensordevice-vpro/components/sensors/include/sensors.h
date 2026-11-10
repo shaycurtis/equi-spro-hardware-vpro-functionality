@@ -3,7 +3,8 @@
  * Slow-rate sensors on the I2C bus:
  *   MAX17048  fuel gauge         (0x36)  battery voltage, state of charge, charge rate
  *   SHTC3     temp / humidity    (0x70)  board temperature + RH, sleeps between readings
- *   LSM6DSOX  6-axis IMU         (0x6B)  accelerometer at 26 Hz low-power, hardware pedometer;
+ *   LSM6DSOX  6-axis IMU         (0x6B)  accelerometer at 26 Hz low-power, hardware pedometer,
+ *             horse position from the gravity direction (posture.c);
  *             + LIS2MDL magnetometer on its sensor hub; streams 9 axes for SD logging
  *   PCF85063A RTC                (0x51)  wall-clock time (coin-cell backed)
  */
@@ -11,6 +12,17 @@
 #include <stdint.h>
 #include <time.h>
 #include "esp_err.h"
+
+/* Horse position: the VPro platform's list and numbering (its LoRa parser's position_list). */
+enum {
+    POSTURE_UNKNOWN = 0,
+    POSTURE_LATERAL,      /* lying on a side */
+    POSTURE_STERNAL,      /* lying on the chest */
+    POSTURE_ROLLING,
+    POSTURE_STANDING,
+    POSTURE_MOVING,       /* upright and stepping */
+    POSTURE_COUNT
+};
 
 typedef struct {
     bool     fg_ok;
@@ -24,6 +36,11 @@ typedef struct {
 
     bool     imu_ok;
     uint32_t steps;           /* since power-on */
+    uint8_t  position;        /* POSTURE_*, the position now */
+    uint8_t  positions_seen;  /* bit n = position n held since sensors_posture_clear_seen() */
+    float    tilt_deg;        /* last left / right roll from the standing axis, < 0 = none yet */
+    float    pitch_deg;       /* last forward / back tilt */
+    float    grav[3];         /* last 1 s mean acceleration, g, sensor axes */
 
     bool     rtc_ok;
     bool     rtc_valid;       /* false if the RTC lost power (oscillator-stop flag) */
@@ -34,6 +51,11 @@ typedef struct {
 esp_err_t sensors_init(void);
 
 void sensors_read(sensor_sample_t *s);
+
+/* Start a new positions-seen period (call after each telemetry reading is built). */
+void sensors_posture_clear_seen(void);
+
+const char *sensors_posture_name(uint8_t position);
 
 /* Current RTC time as a UTC Unix timestamp. ESP_ERR_INVALID_STATE if the RTC lost its time. */
 esp_err_t sensors_get_epoch(uint32_t *epoch_utc);

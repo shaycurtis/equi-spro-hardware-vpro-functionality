@@ -27,19 +27,20 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Power sequencing | ✅ Hold to power on (~1.5 s), long press to power off (2 s), charge-only on USB (light sleep, no reboots) |
 | LEDs | ✅ D1 short blue blink every 5 s while on; D2 shows charge state (red/green/orange); both blink green while waiting for an RFID tag. Off on USB (charge-only): **D1 = charge**, **D2 = Wi-Fi / upload** (see Use, step 6). Purple is reserved for OTA updates |
 | Wi-Fi provisioning | ✅ Espressif `network_provisioning` (SoftAP, security 1), **ESP SoftAP Provisioning** app; per-device setup code; up to 5 saved networks in NVS |
-| Sensors (60 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer), RTC (PCF85063A) |
+| Sensors (60 s) | ✅ Battery (MAX17048), temp/RH (SHTC3), steps (LSM6DSOX pedometer; each reading sends the steps since the previous one, so a missed reading loses its steps), RTC (PCF85063A) |
 | GPS | ✅ Parked in backup mode at boot (`$PAIR650,0`, verified) |
-| BLE telemetry | ✅ Advert v5 every 60 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
+| BLE telemetry | ✅ Advert v6 every 60 s (2 s burst, +15 dBm): battery (1/256 %), temp/RH, steps, heart rate, horse position, 1-byte session tag; **encrypted** identity scan response (AES-CCM, fleet key). Designed for listen-only commercial gateways |
 | PC gateway + dashboard | ✅ SQLite, devices, sessions, charts, ECG panel |
 | On-demand ECG | ✅ MAX30001 512 sps over BLE GATT, verified with real electrodes (74 bpm, ~15 µV noise) |
 | Sessions + RFID HorseID | ✅ Session (Unix time **in ms**, as VPro) starts at the tag scan, or scan-button override (chip "Unknown"); JY-LD6900, 9600 ASCII; per-session dashboard view |
 | Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate; with ECG 512 Hz + IMU 416 Hz logging **~28 mA** (≈2.2 days). Parked until the PPK2 is found (see below) |
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 60 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
+| Horse position | ✅ From the accelerometer's gravity direction (left / right roll thresholds, no gyro, no extra sensor current), in advert v6 -> `position` / `positionsSeen` (see "Horse position" below). Bench-verified 2026-11-10 on 236B2C, held by hand: standing, lateral, sternal, rolling and moving all reported through the gateway. **Angles not yet tuned on a horse**; not yet tried with SD logging on |
 | SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 256 (default) / 512 Hz per `config.json`, mV (as VPro), interrupt-driven (light sleep kept), 0 overflows |
 | Live ECG + app recordings | ✅ VPro-compatible BLE services (Raw ECG 256 sps, Heart Rate, ECG control); works with the **Equimetrics (VPro) app**; app recordings saved as their own EDF files. App needs a backend-registered **16-digit** ID (see "Device IDs" below); verified with `EQUI_CCBA97FFFE236B2C` |
 | SD card IMU logging | ✅ `imu_…edf`: accel ±16 g + gyro ±2000 dps at 104/416 Hz, LIS2MDL mag at 104 Hz (sensor hub), FIFO + INT1, 0 overruns |
-| Live BLE data to the backend | ✅ PC gateway `--mqtt` -> AWS IoT Core (`equimetrics/ble/<thing>/adv`) -> **postBleData** Lambda -> dev API -> Mongo -> app charts, one measurement a minute (`cloud/README.md`). `horseTemperature`, `respiration` (heart rate / 3), `position` and `positionsSeen` are **temporary placeholders** in the Lambda; `heartRate` is 0 when no beats were counted |
+| Live BLE data to the backend | ✅ PC gateway `--mqtt` -> AWS IoT Core (`equimetrics/ble/<thing>/adv`) -> **postBleData** Lambda -> dev API -> Mongo -> app charts, one measurement a minute (`cloud/README.md`). `horseTemperature` and `respiration` (heart rate / 3) are **temporary placeholders** in the Lambda; `position` / `positionsSeen` come from the device (advert v6; `"standing"` / `[]` for older firmware); `heartRate` is 0 when no beats were counted |
 | Charging telemetry | ✅ On USB in charge-only mode: Wi-Fi + SNTP every 10 min, POST to the dev data API (in Mongo) |
 | Wi-Fi file upload | ✅ In charge-only mode after the charging report, as VPro: ECG `prepare` -> PUT to the pre-signed URL -> `process` (IMU: `api/imu` -> PUT), file deleted after success, 3 tries per connection. Verified: a 39 s app recording, 20 KB in 0.25 s, all three steps 200 |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
@@ -101,6 +102,35 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
   Verified 2026-11-10: an app recording uploaded from 236B2C passes an EDF+ check (TAL onsets step by
   0.5 s) and matches the VPro file's layout field for field.
 - Card: Transcend industrial 32 GB, 815 KB/s write over SPI3 at 20 MHz (ECG needs ~1 KB/s).
+
+### Horse position
+
+The device works out the position itself and sends it in the 60 s advert; postBleData posts it as
+`position` and `positionsSeen`, with the VPro platform's names and numbering (`unknown`, `lateral`,
+`sternal`, `rolling`, `standing`, `moving`). Code: `components/sensors/posture.c`.
+
+- **Method (thresholds, as VPro's older `PositionDetection_simple`; VPro's current firmware uses a
+  trained TensorFlow Lite model on accel + gyro at ~100 Hz instead):** the accelerometer is
+  averaged over ~1 s windows; the **left / right roll** of that gravity vector from the "standing"
+  axis (about the horse's head-to-tail axis, the board's normal) gives the class: under 25°
+  standing, 25-60° sternal, 60-120° lateral, over 120° (belly up) rolling, with ±5° hysteresis.
+  Tipping forward or back (pitch) is not a lying position: beyond 60° of pitch the last class is
+  kept. Lying on one side and then the other within 5 s is also rolling. Upright
+  with a pedometer step in that second is `moving`.
+- **Debounce (VPro's values):** a new class must last 3 s (lateral), 39 s (sternal), 2 s (rolling),
+  8 s (standing); moving is immediate. The first position after power-on takes 2 s.
+- **Reporting:** the advert's position byte holds the position at the reading and every position
+  held since the previous reading. The Lambda leaves the current one out of `positionsSeen`, as the
+  LoRa parser does.
+- **Sampling and power:** no gyro and no change of sensor mode. The accelerometer (already on at
+  26 Hz low-power for the pedometer) is batched into the IMU's FIFO at 12.5 Hz, with a FIFO word
+  per pedometer step; the firmware drains it every 15 s and at each reading (one short I2C read, no
+  interrupt). With SD logging on, the detector is fed from the 104 / 416 Hz stream instead.
+- **Mounting:** the board is worn vertically on the horse's chest; held that way it reads +1 g on
+  the sensor's **X** axis, so `POSTURE_UP_X/Y/Z` in `posture.c` is +X and `POSTURE_FWD_*` (head to tail) is Z (measured by hand on 236B2C:
+  0.99 -0.05 0.11 g). The log prints the gravity vector and tilt with every reading
+  (`position … | roll … | pitch … | gravity x y z g`). The angles are starting values and need tuning from a
+  recording on a horse (standing vs sternal is the hard one for a chest sensor).
 
 ### Live ECG with the Equimetrics app (VPro-compatible BLE)
 
@@ -198,7 +228,7 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Protocols (source of truth in code)
 
-- **Telemetry advert v5 + encrypted identity scan response:** `equi-sensordevice-vpro/components/telemetry/include/telemetry.h`
+- **Telemetry advert v6 + encrypted identity scan response:** `equi-sensordevice-vpro/components/telemetry/include/telemetry.h`
   (decoder: `gateway/equi_protocol.py`). Company ID `0xFFFF` is a **test ID**, so get an Equimetrics SIG ID for production.
 - **ECG GATT service (gateway):** `equi-sensordevice-vpro/components/telemetry/ecg_service.h` (start/stop/set-time, 112-sample notifications).
 - **Live ECG / app services (VPro-compatible):** `equi-sensordevice-vpro/components/telemetry/live_service.h`.
@@ -326,8 +356,11 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
    burst and tune TX power after the range test. The app advert (every 1 s) adds a little; measure it.
 6. **Range test** on a horse in the barn (target 50 m): gateway `--summary 60`, walk the device out.
 7. **Respiration** (MAX30001 BioZ or ECG-derived; the app's respiration service and the
-   backend's `respiration` field, now a placeholder, are waiting for it), posture for `position`, and checking R-to-R detection on a horse ECG
+   backend's `respiration` field, now a placeholder, are waiting for it), and checking R-to-R detection on a horse ECG
    (large T waves may need WNDW/PTSF tuning).
+   **Horse position:** check it with SD logging on (the detector is then fed from the stream),
+   then tune the angles from an IMU recording on a horse. Later option: ST's Machine Learning Core
+   in the LSM6DSOX, trained from VPro's labelled data.
 8. Lead-off detection on the MAX30001 (status byte of the live ECG). **On hold (user decision,
    2026-11-10):** with the electrodes unattached the R-to-R detector reports noise as ~130 bpm (soak
    test), which reaches the backend; accepted for now. VPro's DC lead-off (100 nA, +/-300 mV, 25 MOhm

@@ -3,9 +3,22 @@
 #include "i2c_bus.h"
 #include <sys/time.h>
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+/* The idle FIFO holds ~40 s of 12.5 Hz samples; ticks can lag in light sleep, so drain early. */
+#define POSTURE_POLL_MS  15000
 
 static const char *TAG = "sensors";
 static bool s_fg, s_th, s_imu, s_rtc;
+
+static void posture_task(void *arg)
+{
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(POSTURE_POLL_MS));
+        lsm6dsox_posture_poll();
+    }
+}
 
 static bool try_init(const char *name, esp_err_t (*fn)(void))
 {
@@ -24,7 +37,11 @@ esp_err_t sensors_init(void)
     }
     s_fg  = try_init("MAX17048", max17048_init);
     s_th  = try_init("SHTC3", shtc3_init);
+    posture_reset();
     s_imu = try_init("LSM6DSOX", lsm6dsox_init);
+    if (s_imu) {
+        xTaskCreate(posture_task, "posture", 3072, NULL, 4, NULL);
+    }
     s_rtc = try_init("PCF85063A", pcf85063_init);
 
     /* System clock from the RTC, so log timestamps and session IDs are wall-clock time. */
@@ -70,7 +87,31 @@ void sensors_read(sensor_sample_t *s)
     s->fg_ok  = s_fg  && max17048_read(&s->batt_mv, &s->batt_soc, &s->batt_rate) == ESP_OK;
     s->th_ok  = s_th  && shtc3_read(&s->temp_c, &s->rh) == ESP_OK;
     s->imu_ok = s_imu && lsm6dsox_read_steps(&s->steps) == ESP_OK;
+    s->tilt_deg = -1;
+    if (s->imu_ok) {
+        lsm6dsox_posture_poll();          /* up to date at the moment of the reading */
+        posture_state_t p;
+        posture_get(&p);
+        s->position = p.position;
+        s->positions_seen = p.seen;
+        s->tilt_deg = p.tilt_deg;
+        s->pitch_deg = p.pitch_deg;
+        s->grav[0] = p.grav[0];
+        s->grav[1] = p.grav[1];
+        s->grav[2] = p.grav[2];
+    }
     s->rtc_ok = s_rtc && pcf85063_read(&s->rtc_time, &s->rtc_valid) == ESP_OK;
+}
+
+void sensors_posture_clear_seen(void)
+{
+    posture_clear_seen();
+}
+
+const char *sensors_posture_name(uint8_t position)
+{
+    static const char *const names[POSTURE_COUNT] = { "unknown", "lateral", "sternal", "rolling", "standing", "moving" };
+    return position < POSTURE_COUNT ? names[position] : "unknown";
 }
 
 esp_err_t sensors_set_time(uint32_t epoch_utc)

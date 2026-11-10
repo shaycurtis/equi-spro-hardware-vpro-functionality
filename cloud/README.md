@@ -7,7 +7,7 @@ LoRa: device --LoRaWAN--> IoT Core for LoRaWAN --> rule --> postLoraData --> POS
 BLE:  device --advert-->  BLE gateway --MQTT/TLS--> IoT Core --> rule --> postBleData --> same API call
 ```
 
-`post_ble_data/post_ble_data.py` decodes the 60 s telemetry advert (v5) and the encrypted identity
+`post_ble_data/post_ble_data.py` decodes the 60 s telemetry advert (v6; v5 still read) and the encrypted identity
 (session + horse chip) with `gateway/equi_protocol.py`, maps it to the dict `postLoraData` builds,
 and posts it through the same `equimetrics_common` layer (`get_org_id`, `post_measurements`). The
 input format (raw adverts / scan responses as hex) is described at the top of that file.
@@ -23,9 +23,10 @@ Tests (offline, no AWS): `python -m unittest cloud/post_ble_data/test_post_ble_d
 | gatewayId, signalStrength | the gateway message; best RSSI of the burst (>= -70 high, >= -85 medium, else low) |
 | timestamp | gateway receive time of the burst's first advert (Unix ms) |
 | sessionId, horseChipNumber | encrypted identity (session in ms) |
-| batteryLevel, temperature, steps | telemetry advert (steps: since power-on) |
+| batteryLevel, temperature, steps | telemetry advert (steps: those of the last 60 s period, as the VPro LoRa device; firmware before v6 sent the total since power-on) |
 | heartRate | telemetry advert; 0 when no beats were counted (never null) |
-| horseTemperature, respiration, position, positionsSeen | **temporary placeholders** for the app's charts (`placeholder_horse_metrics`): board temperature, round(heartRate / 3), `"standing"`, `[]` |
+| position, positionsSeen | telemetry advert v6 (`horse_position`): the device's position at the reading (`unknown`, `lateral`, `sternal`, `rolling`, `standing`, `moving`, as the LoRa parser) and the other positions held since the previous reading. Firmware before v6: `"standing"`, `[]` |
+| horseTemperature, respiration | **temporary placeholders** for the app's charts (`placeholder_horse_metrics`): board temperature, round(heartRate / 3) |
 | status | Charging / Connected / Disconnected from the USB + charging flags |
 | wifiConnected | false (not in the advert) |
 | fPort, perspiration, lat/long | not sent (not measured / LoRa only) |

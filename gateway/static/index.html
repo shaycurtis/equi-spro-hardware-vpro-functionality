@@ -206,8 +206,9 @@ function renderDevices(devs) {
           <div class="batt"><i style="width:${soc}%;background:${battColor}"></i></div></div>
         <div class="stat"><div class="v">${fmt(d.temp_c, 1, "°C")}</div><div class="l">board temp</div></div>
         <div class="stat"><div class="v">${fmt(d.humidity, 0, "%")}</div><div class="l">humidity</div></div>
-        <div class="stat"><div class="v">${fmt(d.steps)}</div><div class="l">steps since on</div></div>
+        <div class="stat"><div class="v">${fmt(d.steps)}</div><div class="l">${d.position ? "steps last reading" : "steps since on"}</div></div>
         <div class="stat"><div class="v">${d.heart_rate ? d.heart_rate : "–"}</div><div class="l">heart rate bpm</div></div>
+        <div class="stat"><div class="v">${d.position || "–"}</div><div class="l">position</div></div>
         <div class="stat"><div class="v">${Math.floor(d.uptime_min / 60)}h${String(d.uptime_min % 60).padStart(2, "0")}</div><div class="l">uptime</div></div>
       </div>
       <div class="horse">${horseLine(d)}</div>

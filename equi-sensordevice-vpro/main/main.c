@@ -97,7 +97,7 @@ static void log_sample(const sensor_sample_t *s)
         snprintf(th, sizeof(th), "%.2f C %.1f%%RH", s->temp_c, s->rh);
     }
     if (s->imu_ok) {
-        snprintf(steps, sizeof(steps), "steps %lu", (unsigned long)s->steps);
+        snprintf(steps, sizeof(steps), "steps %lu total", (unsigned long)s->steps);
     }
     if (s->rtc_ok) {
         const struct tm *t = &s->rtc_time;
@@ -112,6 +112,18 @@ static void log_sample(const sensor_sample_t *s)
     }
     ESP_LOGI(TAG, "[%s] %s | %s | %s | %s | %s | %s", device_id_get(), batt, th, steps, hr,
              charge_str(power_charge_state()), rtc);
+    if (s->imu_ok) {
+        char seen[48] = "";
+        for (int i = 1; i < POSTURE_COUNT; i++) {
+            if (s->positions_seen & (1u << i)) {
+                strlcat(seen, " ", sizeof(seen));
+                strlcat(seen, sensors_posture_name((uint8_t)i), sizeof(seen));
+            }
+        }
+        ESP_LOGI(TAG, "position %s | seen:%s | roll %.0f deg | pitch %.0f deg | gravity %.2f %.2f %.2f g",
+                 sensors_posture_name(s->position), seen[0] ? seen : " -", s->tilt_deg, s->pitch_deg, s->grav[0],
+                 s->grav[1], s->grav[2]);
+    }
 }
 
 /* ------------------------------------------------------------ sessions */
@@ -424,6 +436,13 @@ static void scan_button_task(void *arg)
 
 static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *t)
 {
+    /* Steps are sent per reading (since the previous one), as the VPro LoRa device does. */
+    static uint32_t steps_sent;
+    uint32_t steps = 0xFFFFFFFF;
+    if (s->imu_ok) {
+        steps = s->steps - steps_sent;
+        steps_sent = s->steps;
+    }
     power_charge_t c = power_charge_state();
     *t = (telemetry_t){
         .device_id = s_dev_id,
@@ -440,7 +459,9 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
         .battery_mv = s->fg_ok ? s->batt_mv : 0,
         .temp_c100 = s->th_ok ? (int16_t)lroundf(s->temp_c * 100.0f) : 0x7FFF,
         .humidity_half = s->th_ok ? (uint8_t)lroundf(s->rh * 2.0f) : 0xFF,
-        .steps = s->imu_ok ? s->steps : 0xFFFFFFFF,
+        .steps = steps,
+        .position = s->imu_ok ? s->position : 0,
+        .positions_seen = s->imu_ok ? s->positions_seen : 0,
     };
     uint8_t beats;
     ecg_hr_get(SAMPLE_PERIOD_S, &t->heart_rate, &beats);
@@ -459,6 +480,7 @@ static void sample_task(void *arg)
         telemetry_t t;
         uint8_t payload[TELEMETRY_PAYLOAD_LEN];
         build_telemetry(&s, seq, &t);
+        sensors_posture_clear_seen();     /* the next reading's positions-seen starts here */
         telemetry_encode(&t, payload);
         esp_err_t err;
         for (int tries = 0; (err = telemetry_ble_burst(payload, ADV_BURST_MS)) == ESP_ERR_INVALID_STATE && tries < 10; tries++) {

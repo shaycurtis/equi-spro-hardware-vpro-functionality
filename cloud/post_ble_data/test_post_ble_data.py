@@ -38,9 +38,16 @@ def mfg(payload: bytes) -> bytes:
 
 
 def telemetry_adv(seq: int, tag: int = SESSION & 0xFF, flags: int = proto.FLAG_RTC_VALID, soc=87.25,
-                  mv=3990, temp=22.91, rh=51, steps=1234, hr=41) -> str:
-    p = bytes([proto.MAGIC, 5]) + DEV + bytes([tag, seq, flags])
+                  mv=3990, temp=22.91, rh=51, steps=1234, hr=41, pos="standing", seen=("standing",),
+                  version=6) -> str:
+    """Advert v6 as the firmware's telemetry_encode() builds it (version=5: without position)."""
+    p = bytes([proto.MAGIC, version]) + DEV + bytes([tag, seq, flags])
     p += struct.pack("<HHhB", round(soc * 256), mv, round(temp * 100), rh) + struct.pack("<I", steps) + bytes([hr])
+    if version >= 6:
+        b = proto.POSITIONS.index(pos)
+        for s in seen:
+            b |= 1 << (proto.POSITIONS.index(s) + 2)
+        p += bytes([b])
     return (ad(0x01, bytes([0x06])) + mfg(p)).hex()
 
 
@@ -106,7 +113,31 @@ class PostBleDataTest(unittest.TestCase):
         # temporary placeholders for the app's horse charts
         self.assertEqual(d["horseTemperature"], Decimal("22.91"))
         self.assertEqual(d["respiration"], 14)                 # round(41 / 3)
+        # position from the advert; the current one is not repeated in positionsSeen
         self.assertEqual((d["position"], d["positionsSeen"]), ("standing", []))
+
+    def post_one(self, **adv):
+        ev = {"gatewayId": "G", "items": [{"rssi": -60, "ts": 1, "adv": telemetry_adv(7, **adv),
+                                           "rsp": identity_rsp()}]}
+        api = FakeApi(ORGS)
+        self.assertEqual(lam.process(ev, api, MAP)["posted"], 1)
+        return api.posted[0]
+
+    def test_position_and_positions_seen(self):
+        # lying on a side now; stood, went down on the chest, then over during the minute
+        d = self.post_one(pos="lateral", seen=("standing", "sternal", "lateral"))
+        self.assertEqual(d["position"], "lateral")
+        self.assertEqual(d["positionsSeen"], ["sternal", "standing"])     # VPro list order
+        d = self.post_one(pos="moving", seen=("moving", "standing", "rolling"))
+        self.assertEqual((d["position"], d["positionsSeen"]), ("moving", ["rolling", "standing"]))
+        # no fix yet (just switched on): unknown, as the LoRa parser's index 0
+        d = self.post_one(pos="unknown", seen=())
+        self.assertEqual((d["position"], d["positionsSeen"]), ("unknown", []))
+
+    def test_firmware_without_position_keeps_the_placeholder(self):
+        d = self.post_one(version=5)
+        self.assertEqual((d["position"], d["positionsSeen"]), ("standing", []))
+        self.assertEqual((d["heartRate"], d["steps"]), (41, 1234))
 
     def test_no_heart_rate_is_zero_not_null(self):
         from types import SimpleNamespace

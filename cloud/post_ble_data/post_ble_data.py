@@ -182,9 +182,20 @@ def build_measurement(t: proto.Telemetry, ident, device_id: str, org_id: str, ga
     if t.temp_c is not None:
         data["temperature"] = Decimal(f"{t.temp_c:.2f}")
     if t.steps is not None:
-        data["steps"] = t.steps                          # since the device was switched on
+        data["steps"] = t.steps                          # v6: in the last period (older: since power-on)
     data.update(placeholder_horse_metrics(t))
+    data.update(horse_position(t))
     return data
+
+
+def horse_position(t: proto.Telemetry) -> dict:
+    """position + positionsSeen as postLoraData's parser gives them: the position at the reading
+    and the other positions held since the last one. Firmware before advert v6 does not send
+    a position: "standing" and [] as before, so the app's chart keeps a value."""
+    if t.position is None:
+        return {"position": "standing", "positionsSeen": []}
+    return {"position": t.position,
+            "positionsSeen": [p for p in (t.positions_seen or []) if p != t.position]}
 
 
 # TEMPORARY placeholders so the app's horse charts have values until the SPRO measures these
@@ -197,8 +208,6 @@ def placeholder_horse_metrics(t: proto.Telemetry) -> dict:
     out = {
         "heartRate": hr,
         "respiration": int(round(hr * RESP_PER_HR)),     # placeholder: derived from heart rate
-        "position": "standing",                          # placeholder: no posture detection yet
-        "positionsSeen": [],
     }
     if t.temp_c is not None:
         out["horseTemperature"] = Decimal(f"{t.temp_c:.2f}")   # placeholder: board temperature

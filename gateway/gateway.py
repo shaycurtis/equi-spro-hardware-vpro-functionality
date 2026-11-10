@@ -53,8 +53,10 @@ CREATE TABLE IF NOT EXISTS readings (
     device_session INTEGER,             -- device session ID (Unix time it started; bit 31 = random)
     horse_id      TEXT,                 -- 15-digit RFID of the horse for that session, if scanned
     heart_rate    INTEGER,              -- bpm (v4 firmware), NULL = no beats detected
-    session_tag   INTEGER               -- v5: low byte of the session ID (device_session filled in
+    session_tag   INTEGER,              -- v5: low byte of the session ID (device_session filled in
                                         -- once the encrypted identity has been decrypted)
+    position      TEXT,                 -- v6: horse position at the reading (VPro names), NULL = older firmware
+    positions_seen TEXT                 -- v6: positions held since the last reading, comma-separated
     -- No UNIQUE key: seq and uptime restart at every device boot, so they are not unique over
     -- time. Duplicate adverts within a burst are merged in memory before insert.
 );
@@ -88,7 +90,7 @@ class Gateway:
         self.db.execute("PRAGMA journal_mode=WAL")   # web app reads while we write
         self.db.executescript(SCHEMA)
         for col in ("session INTEGER", "device_session INTEGER", "horse_id TEXT", "heart_rate INTEGER",
-                    "session_tag INTEGER"):
+                    "session_tag INTEGER", "position TEXT", "positions_seen TEXT"):
             try:   # databases created before these columns existed
                 self.db.execute(f"ALTER TABLE readings ADD COLUMN {col}")
             except sqlite3.OperationalError:
@@ -260,12 +262,13 @@ class Gateway:
             """INSERT INTO readings
                (received_at, device_id, seq, uptime_min, battery_soc, battery_mv, temp_c, humidity,
                 steps, usb, charging, charge_full, charger_fault, rtc_valid, rssi_best, packets, address, session,
-                device_session, horse_id, heart_rate, session_tag)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?)""",
+                device_session, horse_id, heart_rate, session_tag, position, positions_seen)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)""",
             (datetime.now(timezone.utc).isoformat(timespec="seconds"), r["device_id"], r["seq"],
              uptime, r["battery_soc"], r["battery_mv"], r["temp_c"], r["humidity"], r["steps"],
              r["usb"], r["charging"], r["charge_full"], r["charger_fault"], r["rtc_valid"], rssi, address,
-             self.session, r["session"], self.horse_for(t), r["heart_rate"], r["session_tag"]),
+             self.session, r["session"], self.horse_for(t), r["heart_rate"], r["session_tag"], r["position"],
+             None if r["positions_seen"] is None else ",".join(r["positions_seen"])),
         )
         if r["session"] is not None:
             self._touch_session(r["device_id"], r["session"], count=True)
@@ -283,6 +286,7 @@ class Gateway:
         print(f"{now}  {t.device_id}  seq {t.seq:3d}  batt {f(t.battery_soc, '.1f', '%')} {f(t.battery_mv, 'd', 'mV')}"
               f"  {f(t.temp_c, '.2f', 'C')} {f(t.humidity, '.1f', '%RH')}  steps {f(t.steps, 'd')}"
               f"  HR {f(t.heart_rate, 'd', ' bpm')}"
+              f"  pos {t.position or 'n/a'}{' (' + ','.join(t.positions_seen) + ')' if t.positions_seen else ''}"
               f"  {charge:8s}  {'RFID scan  ' if t.rfid_scanning else ''}horse {horse or '-'}  rssi {rssi} dBm")
 
     def print_summary(self) -> None:

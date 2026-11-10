@@ -1,13 +1,17 @@
 /*
  * ST LSM6DSOX, plus the LIS2MDL magnetometer on its sensor hub (SDX/SCX).
  *
- * Idle: accelerometer at 26 Hz low-power with the embedded hardware pedometer, gyro off.
+ * Idle: accelerometer at 26 Hz low-power with the embedded hardware pedometer, gyro off. For
+ * the posture detector the accelerometer is also batched into the FIFO at 12.5 Hz, with one
+ * FIFO word per pedometer step; lsm6dsox_posture_poll() drains it (no interrupt, no extra
+ * sensor current).
  *
  * Streaming (SD logging): accelerometer +-16 g and gyro +-2000 dps at 104 or 416 Hz (high
  * performance), the sensor hub reads the LIS2MDL (100 Hz continuous) at 104 Hz, and all three
  * are batched into the FIFO. INT1 (GPIO8, push-pull, active high) rises at the FIFO watermark;
  * a task then burst-reads the FIFO (tagged words, 7 bytes each) and hands the samples to the
- * callback. The pedometer keeps running (it works from any accelerometer rate >= 26 Hz).
+ * callback. The pedometer keeps running (it works from any accelerometer rate >= 26 Hz), and
+ * the posture detector is fed from the stream.
  */
 #include "sensors_priv.h"
 #include "sensors.h"
@@ -48,6 +52,7 @@
 /* Embedded-functions bank */
 #define REG_EMB_FUNC_EN_A    0x04   /* bit3: PEDO_EN */
 #define REG_EMB_FUNC_EN_B    0x05
+#define REG_EMB_FUNC_FIFO_CFG 0x44  /* bit6: PEDO_FIFO_EN, a FIFO word per step */
 #define REG_STEP_COUNTER_L   0x62
 #define REG_EMB_FUNC_SRC     0x64   /* bit7: PEDO_RST_STEP */
 
@@ -86,6 +91,14 @@
 #define TAG_GYRO             0x01
 #define TAG_ACCEL            0x02
 #define TAG_SHUB0            0x0E
+#define TAG_STEP             0x12
+
+/* Idle FIFO for the posture detector: accelerometer only, 12.5 Hz, continuous mode. */
+#define FIFO_CTRL3_IDLE      0x01   /* BDR_XL 12.5 Hz, gyro not batched */
+#define FIFO_CTRL4_CONT      0x06
+#define IDLE_WINDOW          13     /* samples per ~1 s posture window */
+#define IDLE_ONE_G           16393  /* +-2 g: 0.061 mg/LSB */
+#define STREAM_ONE_G         2049   /* +-16 g: 0.488 mg/LSB */
 
 #define FIFO_WTM             128    /* words: ~0.14 s at 416 Hz, ~0.4 s at 104 Hz */
 #define WORDS_PER_READ       32     /* 224 bytes per I2C burst */
@@ -106,6 +119,8 @@ static bool s_mag_ok;
 static imu_stream_cb_t s_cb;
 static void *s_cb_ctx;
 static bool s_isr_added;
+static bool s_fifo_stream;          /* the FIFO belongs to the stream (under s_lock) */
+static bool s_off;
 
 static void lock(void) { xSemaphoreTake(s_lock, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_lock); }
@@ -156,12 +171,19 @@ esp_err_t lsm6dsox_init(void)
     ESP_RETURN_ON_ERROR(wr(REG_CTRL2_G, 0x00), TAG, "gyro off");
     ESP_RETURN_ON_ERROR(wr(REG_CTRL6_C, CTRL6_C_XL_LP), TAG, "ctrl6");
     ESP_RETURN_ON_ERROR(wr(REG_CTRL1_XL, CTRL1_XL_26HZ_2G), TAG, "ctrl1");
+    ESP_RETURN_ON_ERROR(wr(REG_FIFO_CTRL3, FIFO_CTRL3_IDLE), TAG, "fifo3");
+    ESP_RETURN_ON_ERROR(wr(REG_FIFO_CTRL4, FIFO_CTRL4_CONT), TAG, "fifo4");
+    s_off = false;
 
-    /* Pedometer on, everything else in the embedded block off; reset the count. */
+    /* Pedometer on (steps also into the FIFO), everything else in the embedded block off;
+     * reset the count. */
     ESP_RETURN_ON_ERROR(emb_bank(true), TAG, "bank");
     esp_err_t err = wr(REG_EMB_FUNC_EN_A, 0x08);
     if (err == ESP_OK) {
         err = wr(REG_EMB_FUNC_EN_B, 0x00);
+    }
+    if (err == ESP_OK) {
+        err = wr(REG_EMB_FUNC_FIFO_CFG, 0x40);
     }
     if (err == ESP_OK) {
         err = wr(REG_EMB_FUNC_SRC, 0x80);
@@ -179,8 +201,43 @@ esp_err_t lsm6dsox_init(void)
     }
     s_last_raw = (uint16_t)(b[1] << 8 | b[0]);
     s_total = 0;
-    ESP_LOGI(TAG, "found, accel 26 Hz low-power, pedometer on");
+    ESP_LOGI(TAG, "found, accel 26 Hz low-power, pedometer on, posture FIFO 12.5 Hz");
     return ESP_OK;
+}
+
+void lsm6dsox_posture_poll(void)
+{
+    if (!s_dev) {
+        return;
+    }
+    uint8_t buf[WORDS_PER_READ * 7];
+    lock();
+    if (s_fifo_stream || s_off) {       /* streaming: the IMU task feeds the detector */
+        unlock();
+        return;
+    }
+    uint8_t st[2] = { 0 };
+    uint32_t level = rd(REG_FIFO_STATUS1, st, 2) == ESP_OK ? ((uint32_t)(st[1] & 0x03) << 8 | st[0]) : 0;
+    posture_begin();
+    while (level) {
+        uint32_t n = level < WORDS_PER_READ ? level : WORDS_PER_READ;
+        if (rd(REG_FIFO_DATA_TAG, buf, n * 7) != ESP_OK) {
+            break;
+        }
+        level -= n;
+        for (uint32_t w = 0; w < n; w++) {
+            const uint8_t *q = &buf[w * 7];
+            if (q[0] >> 3 == TAG_ACCEL) {
+                int16_t xyz[3] = { (int16_t)(q[2] << 8 | q[1]), (int16_t)(q[4] << 8 | q[3]),
+                                   (int16_t)(q[6] << 8 | q[5]) };
+                posture_feed_acc(xyz, IDLE_WINDOW, IDLE_ONE_G);
+            } else if (q[0] >> 3 == TAG_STEP) {
+                posture_feed_step();
+            }
+        }
+    }
+    posture_end();
+    unlock();
 }
 
 esp_err_t lsm6dsox_read_steps(uint32_t *steps)
@@ -427,6 +484,7 @@ static esp_err_t stream_config(void)
 {
     uint8_t code = s_rate == 416 ? ODR_CODE_416 : ODR_CODE_104;
     lock();
+    s_fifo_stream = true;
     esp_err_t err = wr(REG_FIFO_CTRL4, 0x00);                         /* bypass: empties the FIFO */
     if (err == ESP_OK) err = wr(REG_CTRL6_C, 0x00);                   /* accel high performance */
     if (err == ESP_OK) err = wr(REG_CTRL7_G, 0x00);                   /* gyro high performance */
@@ -466,7 +524,10 @@ static void stream_unconfig(void)
     }
     wr(REG_CTRL2_G, 0x00);
     wr(REG_CTRL6_C, CTRL6_C_XL_LP);
-    wr(REG_CTRL1_XL, CTRL1_XL_26HZ_2G);   /* back to the pedometer-only state */
+    wr(REG_CTRL1_XL, CTRL1_XL_26HZ_2G);   /* back to the idle state: pedometer + posture FIFO */
+    wr(REG_FIFO_CTRL3, FIFO_CTRL3_IDLE);
+    wr(REG_FIFO_CTRL4, FIFO_CTRL4_CONT);
+    s_fifo_stream = false;
     unlock();
 }
 
@@ -505,17 +566,23 @@ static void imu_task(void *arg)
             }
             stats_reads++;
             level -= n;
+            posture_begin();
             for (uint32_t w = 0; w < n; w++) {
                 const uint8_t *p = &buf[w * 7];
                 int16_t xyz[3] = { (int16_t)(p[2] << 8 | p[1]), (int16_t)(p[4] << 8 | p[3]),
                                    (int16_t)(p[6] << 8 | p[5]) };
                 switch (p[0] >> 3) {
-                case TAG_ACCEL: memcpy(s_acc[b.n_acc++], xyz, sizeof(xyz)); break;
+                case TAG_ACCEL:
+                    memcpy(s_acc[b.n_acc++], xyz, sizeof(xyz));
+                    posture_feed_acc(xyz, s_rate, STREAM_ONE_G);
+                    break;
                 case TAG_GYRO:  memcpy(s_gyr[b.n_gyr++], xyz, sizeof(xyz)); break;
                 case TAG_SHUB0: memcpy(s_mag[b.n_mag++], xyz, sizeof(xyz)); break;
+                case TAG_STEP:  posture_feed_step(); break;
                 default:        stats_unknown++; break;
                 }
             }
+            posture_end();
             bool full = b.n_acc > CB_CAP - WORDS_PER_READ || b.n_gyr > CB_CAP - WORDS_PER_READ ||
                         b.n_mag > CB_CAP - WORDS_PER_READ;
             if (full || level == 0) {
@@ -609,7 +676,9 @@ void lsm6dsox_power_down(void)
         wr(REG_EMB_FUNC_EN_A, 0x00);
         emb_bank(false);
     }
+    wr(REG_FIFO_CTRL4, 0x00);
     wr(REG_CTRL1_XL, 0x00);
     wr(REG_CTRL2_G, 0x00);
+    s_off = true;
     unlock();
 }
