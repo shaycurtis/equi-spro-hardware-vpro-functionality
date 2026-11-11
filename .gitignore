@@ -18,6 +18,9 @@ dependencies.lock.bak
 Thumbs.db
 Desktop.ini
 
+# --- SPRO hardware design (Altium): kept outside the repository, see README ---
+SPRO_PCBA/
+
 # --- Altium temporary / history files ---
 **/History/
 **/Project Logs for */

@@ -11,13 +11,28 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 
 | Path | What it is |
 |---|---|
-| `SPRO_PCBA/` | Altium schematics + PCB (source of truth for the hardware) |
-| `HARDWARE.md` | Pin map, parts, power tree and hardware notes extracted from the PCB netlist |
+| `HARDWARE.md` | Pin map, connector pinout, parts, power tree and hardware notes extracted from the Altium files (not in the repository, see below) |
 | `equi-sensordevice-helloworld-fimware/` | Original IDF 5.2.1 reference project. **`private/` holds the signing keys** |
 | `equi-sensordevice-blink/` | IDF 6.1 bring-up test (+ `recovery/otadata_boot_ota0.bin`, see below) |
 | `equi-sensordevice-vpro/` | **The VPro device firmware** (secure boot + flash encryption) |
 | `gateway-receiver/` | Firmware for a plain ESP32-S3 dev kit used as the BLE gateway radio |
 | `gateway/` | PC gateway (Python) + local web dashboard, see `gateway/README.md` |
+| `cloud/` | AWS side: the postBleData Lambda (IoT Core -> dev API), see `cloud/README.md` |
+| `tools/` | Offline helpers: EDF info, setup codes, the resting respiration study |
+
+### Not in this repository
+
+- **`private/` folders** (git-ignored, never committed): the secure boot signing keys
+  (`equi-sensordevice-helloworld-fimware/private/`), the fleet key, the data API settings
+  (`private/api_env.h`) and the AWS IoT certificates. They stay on the build PC.
+- **SPRO hardware design files** (`SPRO_PCBA/`, Altium schematics, PCB, BOM; ~23 MB, git-ignored):
+  the source of truth for the hardware, kept with the hardware design. Everything the firmware
+  needs from them is in `HARDWARE.md` (pins, nets, connector, parts). Copy the folder back into
+  the repository root if the netlist needs to be read again.
+- **The original VPro firmware** (`equi-sensordevice-platform`, ESP-IDF 5.2.1, LoRa): this
+  firmware was built with it as the reference (BLE services, backend API, EDF+ file format,
+  sessions, charging telemetry), studied read-only; no code was copied. Get it from the
+  Equimetrics code repository if it needs to be consulted or re-imported.
 
 ## Status
 

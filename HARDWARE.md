@@ -1,5 +1,7 @@
 # SPRO PCBA – hardware reference (from Altium SPRO.PcbDoc netlist + schematics)
 
+The Altium files themselves (`SPRO_PCBA/`) are not in the repository; see README, "Not in this repository".
+
 MCU: **ESP32-S3-WROOM-1-N16R8** (U1): 16 MB quad flash, 8 MB octal PSRAM (GPIO35-37 used internally, not routed).
 
 ## ESP32-S3 GPIO map
