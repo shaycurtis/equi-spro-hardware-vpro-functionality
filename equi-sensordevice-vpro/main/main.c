@@ -347,9 +347,20 @@ static void start_session(uint64_t packed, const char *horse)
     }
 }
 
+/* Vibration motor (Q8 on GPIO17, set up as an output, low, by power.c): one pulse. Blocks the
+ * caller for `ms` (the RFID task, which ends right after its callback). */
+#define TAG_BUZZ_MS 250
+static void buzz(int ms)
+{
+    gpio_set_level(BOARD_PIN_MOTOR, 1);
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    gpio_set_level(BOARD_PIN_MOTOR, 0);
+}
+
 static void on_tag(const rfid_tag_t *tag, void *ctx)
 {
     if (tag) {
+        buzz(TAG_BUZZ_MS);                       /* "tag read": felt even when the LEDs aren't seen */
         uint64_t packed = rfid_tag_pack(tag);
         char str[16];
         rfid_tag_str(tag, str);
