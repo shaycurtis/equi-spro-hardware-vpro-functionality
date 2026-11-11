@@ -1,0 +1,8 @@
+dependencies:
+  idf: ">=6.1"
+  # Official Espressif components (component registry), used unmodified.
+  espressif/network_provisioning: "^1.0.0"   # SoftAP Wi-Fi provisioning (moved out of IDF in v6.0)
+  espressif/mqtt: "^1.0.0"                   # esp-mqtt (moved out of IDF in v6.0)
+  espressif/cjson: "^1.7.0"                  # fleet provisioning responses
+  espressif/led_strip: "^3.0.0"              # dev board RGB LED (WS2812)
+  espressif/qrcode: "^0.1.0"                 # provisioning QR code on the serial log

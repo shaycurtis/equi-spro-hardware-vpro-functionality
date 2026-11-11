@@ -1,0 +1,37 @@
+# Equimetrics BLE gateway - plain ESP32-S3 dev board (DevKitC-1 / -1U). No secure boot / flash
+# encryption here (dev). Never reuse the VPro sdkconfig on this board or this one on a SPRO board.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# BLE: NimBLE observer only (active scanning; never connects to the devices)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+CONFIG_BT_NIMBLE_NVS_PERSIST=n
+CONFIG_BT_CTRL_BLE_SCAN_DUPL=n
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
+# Wi-Fi + BLE share the radio (software coexistence)
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# Fleet provisioning by claim: the gateway makes its own key pair + CSR (CreateCertificateFromCsr)
+CONFIG_MBEDTLS_PEM_WRITE_C=y
+CONFIG_MBEDTLS_PK_WRITE_C=y
+CONFIG_MBEDTLS_X509_CREATE_C=y
+CONFIG_MBEDTLS_X509_CSR_WRITE_C=y
+# Amazon Root CA 1 comes from IDF's certificate bundle
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# SoftAP provisioning (ESP SoftAP Provisioning app), security 1
+CONFIG_NETWORK_PROV_NETWORK_TYPE_WIFI=y
+# IDF 6.1 enables only security 2 by default; security 1 is what the SPRO's SoftAP provisioning
+# used with the ESP SoftAP Provisioning app (PoP only, no username).
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y

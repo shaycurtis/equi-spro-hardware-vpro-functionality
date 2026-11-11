@@ -1,0 +1,56 @@
+menu "Equimetrics gateway"
+
+    config GW_IOT_ENDPOINT
+        string "AWS IoT Core endpoint (empty = from private/.../endpoint.txt)"
+        default ""
+
+    config GW_FLEET_TEMPLATE
+        string "Fleet provisioning template name"
+        default "equimetrics-ble-gateway-fleet"
+
+    config GW_THING_PREFIX
+        string "Prefix of the serial number sent to the template (thing name = template's choice)"
+        default ""
+        help
+            The template gets SerialNumber = this prefix + the 12 hex digits of the base MAC.
+
+    config GW_PROV_POP
+        string "SoftAP provisioning proof of possession (also the setup Wi-Fi password, >= 8 chars)"
+        default "equigw01"
+
+    config GW_LED_GPIO
+        int "RGB LED (WS2812) GPIO (DevKitC-1 v1.0: 48, v1.1: 38, -1 = none)"
+        default 48
+
+    config GW_BUTTON_GPIO
+        int "Button GPIO (BOOT = 0); hold 3 s to re-enter Wi-Fi provisioning"
+        default 0
+
+    config GW_SCAN_ITVL_MS
+        int "BLE scan interval (ms)"
+        default 100
+
+    config GW_SCAN_WINDOW_MS
+        int "BLE scan window (ms); the rest of each interval is Wi-Fi's"
+        default 50
+        help
+            Wi-Fi and BLE share one radio. At 90 of 100 ms Wi-Fi took ~45 s to connect (failed
+            association, slow DHCP); at 50 % a 2 s burst still gives ~9 copies + the scan response.
+
+    config GW_BURST_SETTLE_MS
+        int "Wait after a burst's first advert before queuing it (ms); bursts last 2 s"
+        default 3000
+
+    config GW_QUEUE_LEN
+        int "Bursts buffered while offline (~280 bytes each; one per device per minute)"
+        default 128
+
+    config GW_PUBLISH_INTERVAL_S
+        int "Publish queued bursts every N seconds (batches Wi-Fi use)"
+        default 5
+
+    config GW_SNTP_SERVER
+        string "SNTP server"
+        default "pool.ntp.org"
+
+endmenu

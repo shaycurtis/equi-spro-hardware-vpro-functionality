@@ -1,0 +1,3 @@
+# Overlay for ESP32-S3-WROOM-2 dev kits (octal flash at 1.8 V, e.g. the old receiver kit, MAC f4:12:fa:e8:6d:10).
+# Build: idf.py -B build-wroom2 -D SDKCONFIG=build-wroom2/sdkconfig -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.wroom2" build
+CONFIG_ESPTOOLPY_OCT_FLASH=y

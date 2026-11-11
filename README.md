@@ -16,6 +16,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | `equi-sensordevice-blink/` | IDF 6.1 bring-up test (+ `recovery/otadata_boot_ota0.bin`, see below) |
 | `equi-sensordevice-vpro/` | **The VPro device firmware** (secure boot + flash encryption) |
 | `gateway-receiver/` | Firmware for a plain ESP32-S3 dev kit used as the BLE gateway radio |
+| `equi-gateway-esp32/` | **Standalone BLE gateway** (ESP32-S3 dev board): scans the adverts and publishes them to IoT Core over Wi-Fi, replacing the PC gateway for the live path. See `equi-gateway-esp32/README.md` |
 | `gateway/` | PC gateway (Python) + local web dashboard, see `gateway/README.md` |
 | `cloud/` | AWS side: the postBleData Lambda (IoT Core -> dev API), see `cloud/README.md` |
 | `tools/` | Offline helpers: EDF info, setup codes, the resting respiration study |
@@ -59,6 +60,7 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Live BLE data to the backend | ✅ PC gateway `--mqtt` -> AWS IoT Core (`equimetrics/ble/<thing>/adv`) -> **postBleData** Lambda -> dev API -> Mongo -> app charts, one measurement a minute (`cloud/README.md`). `horseTemperature` and `respiration` (heart rate / 3) are **temporary placeholders** in the Lambda; `position` / `positionsSeen` come from the device (advert v6; `"standing"` / `[]` for older firmware); `heartRate` is 0 when no beats were counted |
 | Charging telemetry | ✅ On USB in charge-only mode: Wi-Fi + SNTP every 10 min, POST to the dev data API (in Mongo) |
 | Wi-Fi file upload | ✅ In charge-only mode after the charging report, as VPro: ECG `prepare` -> PUT to the pre-signed URL -> `process` (IMU: `api/imu` -> PUT), file deleted after success, 3 tries per connection. Verified: a 39 s app recording, 20 KB in 0.25 s, all three steps 200 |
+| ESP32-S3 gateway (phase 1) | 🟡 `equi-gateway-esp32/`: SoftAP Wi-Fi provisioning, NimBLE active scan, esp-mqtt to IoT Core in the PC gateway's format (postBleData unchanged), fleet provisioning by claim, offline buffer, LED + status log. Verified 2026-11-11 on the old receiver kit (COM4, now thing `equi-gw-F412FAE86D10`): fleet provisioning, then readings through IoT Core -> postBleData with the PC gateway stopped (15B0B4 published and decoded by the Lambda's code; full loop seen by the user; 236B2C heard too). Both devices count it as their trusted gateway (same chip as the receiver, see its README). Shadow settings and OTA are planned (its README) |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
 
 ## Device behaviour (user view)
@@ -161,6 +163,12 @@ connector gives the horse temperature instead (`components/probe`, details in `p
 | 5 | CON_3V3: VDD33 through the 50 mA PTC fuse F1 | VDD (red), powered mode |
 | 8 | GND | GND (black) |
 
+- **Board fault on 236B2C (2026-11-11):** the probe isn't found on 236B2C. Every check logs
+  `1-wire.rmt: … reset pulse receive timeout`, which means GPIO12 never sees the line come back high.
+  The connector pins measure right (3.3 V on pins 4 and 5). The same probe is found straight away on 15B0B4
+  (`DS18B20 79000000B2726428`). A good board with no probe gives no `E` line, just `no DS18B20`, so
+  the timeout points to an open between connector pin 4 / U15 and GPIO12 (module pin 20) on that
+  board. To check: continuity pin 4 -> U15 -> module pin 20.
 - **Reading:** each 60 s reading collects the conversion started at the previous one and starts the
   next (12 bits, 0.0625 °C), so the value is up to a minute old. The first reading after boot is
   n/a. Plugging the probe in or out is detected at every reading (log: `probe: DS18B20 <ROM> on the
@@ -205,7 +213,7 @@ existing **Equimetrics app** works unchanged. Details: `components/telemetry/liv
 
   | Board | Backend ID |
   |---|---|
-  | 15B0B4 | `50787DFFFE15B0B4` (still runs the 6-digit firmware until reflashed) |
+  | 15B0B4 | `50787DFFFE15B0B4` |
   | 236B2C | `CCBA97FFFE236B2C` |
 - Measured: 1529-1537 notifications/min (256 sps), 0 dropped at MTU 247; a phone reconnect mid-
   recording dropped 5 notifications while the MTU was renegotiated, the recording carried on.
@@ -268,12 +276,16 @@ python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default-reset --afte
 - Back to the original SPro app (in ota_0): write `equi-sensordevice-blink/recovery/otadata_boot_ota0.bin`
   encrypted to 0x320000 (same esptool options).
 
-**Receiver dev kit (COM4):** plain chip, no security. `cd gateway-receiver; idf.py -p COM4 flash`.
+**Receiver dev kit (COM4):** plain chip, no security. **Since 2026-11-11 it runs the ESP32 gateway**
+(`equi-gateway-esp32/`, WROOM-2 build, see its README). Back to the PC receiver: `cd gateway-receiver; idf.py -p COM4 flash`.
 Check `get-security-info` says *Secure Boot: Disabled* first. Never flash VPro images there.
 
 COM numbers can change: identify boards by `get-security-info` (SPRO CP210x serial `0001`).
 
 ## Run the gateway and dashboard
+
+The live path to AWS now runs on the ESP32 gateway (`equi-gateway-esp32/`) without a PC. The PC
+gateway below is still the way to get the local dashboard and on-demand ECG, with the receiver firmware on the dev kit.
 
 ```powershell
 python gateway\gateway.py --serial COM4 --web

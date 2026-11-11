@@ -117,6 +117,11 @@ Core -> MQTT test client -> subscribe to `equimetrics/ble/#` (messages arrive), 
 postBleData logs in CloudWatch (`done: {... 'posted': 1 ...}`) and the measurement in Mongo.
 `--mqtt-dry-run` builds the messages without AWS and writes them to `gateway/data/mqtt_out/`.
 
+**f. ESP32-S3 gateways** (`equi-gateway-esp32/`) publish the same messages to the same topic
+pattern under their own things, created on first boot by **fleet provisioning by claim**. The
+template, claim policy and claim certificate steps are in `equi-gateway-esp32/README.md` (*AWS set-up*).
+The policy, rule and Lambda above are unchanged.
+
 ## Not done yet
 
 - De-duplication across messages / several gateways and an identity cache (DynamoDB, keyed by
