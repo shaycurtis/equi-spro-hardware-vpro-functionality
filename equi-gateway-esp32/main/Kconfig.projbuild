@@ -19,8 +19,13 @@ menu "Equimetrics gateway"
         default "equigw01"
 
     config GW_LED_GPIO
-        int "RGB LED (WS2812) GPIO (DevKitC-1 v1.0: 48, v1.1: 38, -1 = none)"
-        default 48
+        int "RGB LED (WS2812) GPIO (DevKitC-1 v1.1: 38, v1.0: 48, -1 = none)"
+        default 38
+
+    config GW_LED_BRIGHTNESS
+        int "RGB LED brightness (% of the built-in levels)"
+        range 1 100
+        default 30
 
     config GW_BUTTON_GPIO
         int "Button GPIO (BOOT = 0); hold 3 s to re-enter Wi-Fi provisioning"

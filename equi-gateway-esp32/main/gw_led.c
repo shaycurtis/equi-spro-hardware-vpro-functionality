@@ -18,9 +18,16 @@ static led_strip_handle_t s_strip;
 static volatile gw_led_state_t s_state = GW_LED_BOOT;
 static volatile int s_pulse;
 
+/* Scale by CONFIG_GW_LED_BRIGHTNESS; a lit channel never drops to 0. */
+static uint8_t dim(uint8_t v)
+{
+    uint32_t d = (uint32_t)v * CONFIG_GW_LED_BRIGHTNESS / 100;
+    return v && !d ? 1 : (uint8_t)d;
+}
+
 static void set(uint8_t r, uint8_t g, uint8_t b)
 {
-    led_strip_set_pixel(s_strip, 0, r, g, b);
+    led_strip_set_pixel(s_strip, 0, dim(r), dim(g), dim(b));
     led_strip_refresh(s_strip);
 }
 

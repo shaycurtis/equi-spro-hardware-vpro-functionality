@@ -34,8 +34,9 @@ Any plain ESP32-S3 dev board with 4 MB flash or more, e.g. **ESP32-S3-DevKitC-1*
 range, **-1U** with an external U.FL antenna. No secure boot or flash encryption (dev); never flash
 VPro images onto it, or this image onto a SPRO board.
 
-- RGB LED: GPIO 48 (DevKitC-1 v1.0). **v1.1 boards use GPIO 38**: `idf.py menuconfig` ->
-  *Equimetrics gateway* -> *RGB LED GPIO*.
+- RGB LED: GPIO 38 (DevKitC-1 **v1.1**, printed "RGB IO38" on the board). **v1.0 boards use
+  GPIO 48**: `idf.py menuconfig` -> *Equimetrics gateway* -> *RGB LED GPIO*.
+  Brightness: *RGB LED brightness* (`CONFIG_GW_LED_BRIGHTNESS`, default 30 %).
 - Button: **BOOT** (GPIO 0).
 - Power: any USB port (the "UART" one also gives the log).
 
