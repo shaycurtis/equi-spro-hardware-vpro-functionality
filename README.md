@@ -1,7 +1,7 @@
 # Equimetrics VPro firmware (SPRO PCBA)
 
 Custom firmware for the Equimetrics SPRO sensor board (ESP32-S3-WROOM-1-N16R8), a horse-worn
-chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-08, afternoon** (after the overnight test).
+chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-16** (after the firmware review and its fixes).
 
 > **Signing keys never leave this PC.** `**/private/` and `*.pem` are git-ignored. All
 > building and signing is local. The **fleet key** (`private/fleet_key.bin`, 16 bytes) is built into the
@@ -81,7 +81,8 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
      (twice each, 30 s per try), then any saved network not seen (maybe a hidden SSID, once each). A
      failed round again after 30 s, 1 min, 2 min, then every 5 min; recordings still on the card after
      1 min; otherwise every 10 min.
-7. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white.
+7. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white. From a running session the recordings are closed and the SD card unmounted before the restart.
+8. **Crash or watchdog reset while running:** the device stays on and **carries on with the same session** (no tag scan, no buzz; same session ID, horse and advert sequence; first advert ~2 s after the reset). The session is kept in RTC memory, so it is lost with the power, as it should be. With SD logging on, the recording continues in new files in the same session folder, named after the restart time. Five advert bursts failing in a row (~5 min) also restart the device this way. Verified 2026-11-16 on 0840E8 with a forced `abort()` (see Gotchas).
 
 ### SD card recording
 
@@ -271,7 +272,9 @@ python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default-reset --afte
   slot instead of the SPro app in ota_0). Then: read the device ID from the boot log
   (`using SPro device ID from NVS: …`), have it registered in the dev DB, and provision Wi-Fi.
   Fit a **blank SD card** (the firmware does not wipe old SPro files; it only writes `config.json` if
-  it is missing). Boards done so far: `15B0B4`, `236B2C`.
+  it is missing). Boards done so far: `15B0B4`, `236B2C`, `0840E8` (backend ID
+  `DCB4D9FFFE0840E8`, **not registered on dev yet**; Wi-Fi provisioned 2026-11-16; the only board
+  on the 2026-11-16 build with the review fixes, the other two still need flashing).
 - Check the port first: `esptool -p COM3 --no-stub get-security-info` must say *Secure Boot: Enabled*.
 - Back to the original SPro app (in ota_0): write `equi-sensordevice-blink/recovery/otadata_boot_ota0.bin`
   encrypted to 0x320000 (same esptool options).
@@ -305,7 +308,17 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 ## Gotchas learned (read before changing things)
 
-- **FreeRTOS tick is 10 ms**: `pdMS_TO_TICKS(1)` is 0. Use `esp_rom_delay_us()` for sub-tick waits.
+- **FreeRTOS tick is 1 ms** (`CONFIG_FREERTOS_HZ=1000` in `sdkconfig`; this note and a few code
+  comments used to say 10 ms). Use `esp_rom_delay_us()` for sub-millisecond waits.
+- **Restarting a running device:** use `power_restart()` (runs the shutdown callbacks: recordings
+  closed, SD card unmounted), never a bare `esp_restart()`. The next boot is a "resume"
+  (`power_resumed()`), and `main.c` then restores the session from RTC memory (`s_keep`).
+- **Testing the resume:** set `CRASH_TEST_HOLD_MS` in `main.c` (e.g. 8000): holding the scan button
+  alone that long calls `abort()`. A reset from the serial lines (EN) counts as a power-on, so it
+  does not test it. Set it back to 0 before the build leaves the bench.
+- **BLE host reset:** NimBLE keeps its "advertising set configured" state across a host reset while
+  the controller forgets the sets, so `on_reset` clears our own flags and both adverts are
+  configured again (from reading the IDF 6.1 source; not reproduced on hardware).
 - **MAX30001**: the first SPI command after reset returns invalid data (dummy read after reset).
   SDO swings only to OVDD = 1.8 V, out of spec for ESP32 VIH but working; keep SPI at 4 MHz.
   Flag for the next board revision.
@@ -440,7 +453,14 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
    test), which reaches the backend; accepted for now. VPro's DC lead-off (100 nA, +/-300 mV, 25 MOhm
    bias) has wrongly reported leads off on a horse before, so it is not a quick fix.
 9. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.
-10. Production items: SIG company ID, off-the-shelf listen-only gateway (active scan + scan
+10. **Firmware review (2026-11-16), still to do:** flash 15B0B4 and 236B2C with the fixed build;
+   with SD logging on, check that the provisioning gesture closes the files and that a resumed
+   session writes new files; register `DCB4D9FFFE0840E8` on dev. Review findings not fixed yet: a
+   new-horse file switch stalls if one signal has stopped; an app recording with no duration never
+   ends if the app goes away; header-only files (no records) are uploaded; the session tag has
+   only 32 values (ms IDs are multiples of 1000); no crash counter / reset reason in the telemetry;
+   NVS is not encrypted and the gateway ECG service needs no pairing (production).
+11. Production items: SIG company ID, off-the-shelf listen-only gateway (active scan + scan
    responses), per-device keys and BLE passkey, AWS backend, test-lab check that +15 dBm stays
    within the SPRO certification.
 

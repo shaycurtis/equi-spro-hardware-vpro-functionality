@@ -65,6 +65,15 @@ void power_shutdown(void) __attribute__((noreturn));
 /* Same, without the orange "powering off" flashes (LEDs just go dark). */
 void power_shutdown_silent(void) __attribute__((noreturn));
 
+/* Run the shutdown callbacks, then restart with the power latch kept on (the next boot is a
+ * "resume", see power_resumed). For a restart from a running device: files are closed and the SD
+ * card unmounted first. Never returns. */
+void power_restart(void) __attribute__((noreturn));
+
+/* True if this boot followed a reset while the device was running (panic, watchdog, or
+ * power_restart / esp_restart with the latch on), not a power-on. Valid after power_early_init. */
+bool power_resumed(void);
+
 /* True if the device was powered on with both buttons held (the provisioning gesture). */
 bool power_boot_prov_gesture(void);
 

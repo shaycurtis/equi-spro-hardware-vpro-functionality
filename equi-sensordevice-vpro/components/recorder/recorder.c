@@ -535,7 +535,8 @@ esp_err_t recorder_start(const recorder_cfg_t *cfg)
     if (!s_lock || !s_chunk) {
         return ESP_ERR_NO_MEM;
     }
-    s_cur = (meta_t){ .session = cfg->session, .file_id = cfg->session, .epoch = cfg->epoch };
+    s_cur = (meta_t){ .session = cfg->session, .file_id = cfg->file_id ? cfg->file_id : cfg->session,
+                      .epoch = cfg->epoch };
     set_horse(&s_cur, cfg->horse);
 
     if (cfg->ecg_rate_hz && recorder_clip_active()) {

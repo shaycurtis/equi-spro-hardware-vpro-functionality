@@ -17,6 +17,7 @@
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "esp_ota_ops.h"
@@ -47,6 +48,29 @@ static uint32_t s_dev_id;
 static volatile uint64_t s_session;   /* Unix time in ms (as VPro), 0 = no session yet */
 static volatile uint64_t s_horse;      /* ISO 11784 packed, 0 = none */
 static volatile bool s_scanning;
+
+/*
+ * The session, kept in RTC memory so it survives a reset while running (panic, watchdog,
+ * power_restart): the power latch stays on through those, and the device then carries on with
+ * the same session instead of waiting for a tag again (nobody is there to scan one, and readings
+ * without a session are not posted to the backend). Lost with the power, as it should be.
+ */
+#define KEEP_MAGIC 0x4B454550u   /* "KEEP" */
+typedef struct {
+    uint32_t magic;
+    uint8_t seq;          /* next advert sequence number */
+    uint64_t session;     /* 0 = no session started in this run */
+    uint64_t horse;
+    char horse_str[16];
+} keep_t;
+static RTC_NOINIT_ATTR keep_t s_keep;
+static bool s_resumed;    /* this boot continues a run (s_keep is valid) */
+
+/* Development only: scan button held alone this long = abort(), to test the resume after a
+ * crash. 0 = off (always, in a build that leaves the bench). */
+#define CRASH_TEST_HOLD_MS 0
+
+#define BURST_FAILS_RESTART 5  /* advert bursts failing in a row (~5 min): restart, session kept */
 
 static const char *TAG = "main";
 
@@ -320,6 +344,25 @@ static void on_charge_only(void)
     cloud_charging_start(&c);
 }
 
+/* Start the SD recording of the current session, if config.json asks for one. file_id 0 = the
+ * session ID (the normal file name). */
+static void start_recording(uint64_t file_id, uint32_t epoch, const char *horse)
+{
+    const storage_config_t *cfg = storage_config();
+    if (!storage_mounted() || !(cfg->ecg_log || cfg->imu_log)) {
+        return;
+    }
+    recorder_cfg_t rc = {
+        .device_id = device_id_backend_get(), .session = s_session, .file_id = file_id, .epoch = epoch,
+        .horse = horse,
+        .ecg_rate_hz = cfg->ecg_log ? cfg->ecg_rate_hz : 0,
+        .imu_rate_hz = cfg->imu_log ? cfg->imu_rate_hz : 0,
+    };
+    if (recorder_start(&rc) != ESP_OK) {
+        ESP_LOGW(TAG, "SD recording not started");
+    }
+}
+
 static void start_session(uint64_t packed, const char *horse)
 {
     strlcpy(s_horse_str, horse ? horse : "", sizeof(s_horse_str));
@@ -327,24 +370,42 @@ static void start_session(uint64_t packed, const char *horse)
     uint32_t epoch = now_epoch();
     s_session = new_session_id();
     s_horse = packed;
+    s_keep.session = 0;                  /* not valid while it is being replaced */
+    s_keep.horse = packed;
+    strlcpy(s_keep.horse_str, s_horse_str, sizeof(s_keep.horse_str));
+    s_keep.session = s_session;
     ESP_LOGI(TAG, "session %llu started, HorseID %s%s", (unsigned long long)s_session, horse ? horse : "Unknown",
              (s_session & SESSION_RANDOM_BIT) ? " (random ID: RTC not set)" : "");
     publish_identity();
-    const storage_config_t *cfg = storage_config();
-    if (storage_mounted() && (cfg->ecg_log || cfg->imu_log)) {
-        if (first) {
-            recorder_cfg_t rc = {
-                .device_id = device_id_backend_get(), .session = s_session, .epoch = epoch, .horse = horse,
-                .ecg_rate_hz = cfg->ecg_log ? cfg->ecg_rate_hz : 0,
-                .imu_rate_hz = cfg->imu_log ? cfg->imu_rate_hz : 0,
-            };
-            if (recorder_start(&rc) != ESP_OK) {
-                ESP_LOGW(TAG, "SD recording not started");
-            }
-        } else {
+    if (first) {
+        start_recording(0, epoch, horse);
+    } else {
+        const storage_config_t *cfg = storage_config();
+        if (storage_mounted() && (cfg->ecg_log || cfg->imu_log)) {
             recorder_new_session(s_session, epoch, horse);
         }
     }
+}
+
+/* After a reset while running: carry on with the session that was running. Its SD recording
+ * continues in new files in the same session folder, named after the restart time (as app
+ * recordings are named after their start), so the files from before the reset are kept. */
+static bool resume_session(void)
+{
+    if (!s_resumed || !s_keep.session) {
+        return false;
+    }
+    s_keep.horse_str[sizeof(s_keep.horse_str) - 1] = 0;
+    strlcpy(s_horse_str, s_keep.horse_str, sizeof(s_horse_str));
+    s_session = s_keep.session;
+    s_horse = s_keep.horse;
+    ESP_LOGW(TAG, "resuming session %llu after a reset (reason %d), HorseID %s", (unsigned long long)s_session,
+             (int)esp_reset_reason(), s_horse_str[0] ? s_horse_str : "Unknown");
+    publish_identity();
+    uint32_t epoch = now_epoch();
+    uint64_t file_id = epoch ? (uint64_t)epoch * 1000u : (SESSION_RANDOM_BIT | esp_random());
+    start_recording(file_id, epoch, s_horse_str[0] ? s_horse_str : NULL);
+    return true;
 }
 
 /* Vibration motor (Q8 on GPIO17, set up as an output, low, by power.c): one pulse. Blocks the
@@ -410,6 +471,7 @@ static void scan_button_task(void *arg)
     gpio_config(&io);
     int low_ms = 0, both_ms = 0;
     bool combo = false;
+    bool armed = false;   /* the scan button has been seen released since this task started */
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100));      /* slow poll: the low-level wake-up covers sleep */
         if (power_shutting_down()) {
@@ -418,8 +480,18 @@ static void scan_button_task(void *arg)
         bool scan = gpio_get_level(BOARD_PIN_SCAN_BTN) == 0;
         bool pwr = gpio_get_level(BOARD_PIN_PWR_BTN) == 1;
         power_set_combo(scan && pwr);
+        if (!armed) {
+            if (scan) {
+                continue;                        /* held since before this boot: not a press */
+            }
+            armed = true;
+        }
         if (scan) {
             low_ms += 100;
+            if (CRASH_TEST_HOLD_MS && !pwr && !combo && low_ms >= CRASH_TEST_HOLD_MS) {
+                ESP_LOGE(TAG, "crash test: abort()");
+                abort();
+            }
             if (pwr) {
                 combo = true;
                 if ((both_ms += 100) == 500) {
@@ -492,7 +564,8 @@ static void sample_task(void *arg)
 {
     /* Deadlines from esp_timer (real time): FreeRTOS ticks can lag during light sleep. */
     int64_t next_us = esp_timer_get_time();
-    uint8_t seq = 0;
+    uint8_t seq = s_resumed ? s_keep.seq : 0;   /* carries on after a reset while running */
+    int burst_fails = 0;
     for (;;) {
         sensor_sample_t s;
         sensors_read(&s);
@@ -510,10 +583,19 @@ static void sample_task(void *arg)
         }
         if (err == ESP_OK) {
             ESP_LOGI(TAG, "advert seq %u sent (%d ms burst)", seq, ADV_BURST_MS);
+            burst_fails = 0;
         } else {
             ESP_LOGW(TAG, "advert seq %u failed: %s", seq, esp_err_to_name(err));
+            burst_fails++;
         }
         seq++;
+        s_keep.seq = seq;
+        if (burst_fails >= BURST_FAILS_RESTART) {
+            /* Bluetooth is not coming back by itself and nothing reaches the gateway: restart
+             * cleanly (recordings closed); the session resumes. */
+            ESP_LOGE(TAG, "%d advert bursts failed in a row: restarting", burst_fails);
+            power_restart();
+        }
 #ifdef CONFIG_PM_PROFILING
         if (seq % 2 == 0) {
             esp_pm_dump_locks(stdout);   /* power profiling: time per mode and per lock (cumulative) */
@@ -550,6 +632,10 @@ void app_main(void)
 
     ESP_LOGI(TAG, "VPro running");
     confirm_ota_image();
+    s_resumed = power_resumed() && s_keep.magic == KEEP_MAGIC;
+    if (!s_resumed) {
+        s_keep = (keep_t){ .magic = KEEP_MAGIC };   /* a new run: nothing to carry on with */
+    }
 
     /* Dynamic frequency scaling + automatic light sleep whenever every task is idle.
      * Drivers that need a running clock (ECG SPI polling, RFID / GNSS UART) hold a
@@ -590,8 +676,13 @@ void app_main(void)
     ESP_ERROR_CHECK(ecg_init());           /* continuous heart rate from the MAX30001 */
     power_register_shutdown_cb(rfid_shutdown);
 
-    start_rfid_scan();                   /* "scan the horse's tag" */
-    xTaskCreate(scan_button_task, "scan_btn", 2560, NULL, 3, NULL);
+    if (resume_session()) {
+        show_running_leds();             /* reset while running: same session, no tag scan */
+    } else {
+        start_rfid_scan();               /* "scan the horse's tag" */
+    }
+    /* 4096: the both-buttons gesture runs the shutdown callbacks from this task (power_restart). */
+    xTaskCreate(scan_button_task, "scan_btn", 4096, NULL, 3, NULL);
 
 #if ECG_BOOT_SELFTEST
     ecg_request_t req = { .seconds = 3, .test_signal = true, .on_block = selftest_block };

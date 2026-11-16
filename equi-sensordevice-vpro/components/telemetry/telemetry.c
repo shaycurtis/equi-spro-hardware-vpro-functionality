@@ -25,7 +25,7 @@ static char s_name[24];
 static uint8_t s_rsp[31];
 static size_t s_rsp_len;
 static volatile bool s_synced;
-static bool s_adv_configured;
+static volatile bool s_adv_configured;
 static volatile int64_t s_gw_seen_us = -1;   /* last scan request from a gateway */
 static volatile uint32_t s_scan_reqs;
 
@@ -37,7 +37,7 @@ static volatile uint32_t s_scan_reqs;
 #define APP_ADV_INSTANCE 1   /* the app: connectable, with the name the app filters on */
 #define APP_ADV_ITVL_MS 1000 /* continuous, so the app finds us any time (as VPro) */
 
-static bool s_app_adv_configured;
+static volatile bool s_app_adv_configured;
 static void app_adv_start(void);
 
 /*
@@ -126,6 +126,10 @@ static void on_sync(void)
 static void on_reset(int reason)
 {
     s_synced = false;
+    /* The controller has lost both advertising sets: configure them again (parameters, data,
+     * scan response) on the next burst / at the next sync, or every later start would fail. */
+    s_adv_configured = false;
+    s_app_adv_configured = false;
     ESP_LOGW(TAG, "BLE host reset, reason %d", reason);
 }
 

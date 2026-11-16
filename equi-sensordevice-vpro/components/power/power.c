@@ -366,15 +366,50 @@ static volatile bool s_shutting_down;
 void power_set_combo(bool held) { s_combo = held; }
 bool power_shutting_down(void) { return s_shutting_down; }
 
-static void __attribute__((noreturn)) shutdown(bool flash)
+bool power_resumed(void) { return s_resume; }
+
+/* Only one task shuts the device down (or restarts it): the callbacks must not run twice. A
+ * second caller (e.g. the power button during a provisioning timeout) waits here for the end. */
+static void claim_shutdown(void)
 {
+    static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+    portENTER_CRITICAL(&mux);
+    bool mine = !s_shutting_down;
     s_shutting_down = true;
-    ESP_LOGI(TAG, "Shutting down...");
-    status_led_set(flash ? LED_ORANGE : LED_OFF);
+    portEXIT_CRITICAL(&mux);
+    if (!mine) {
+        for (;;) {
+            vTaskDelay(portMAX_DELAY);
+        }
+    }
+}
+
+static void run_shutdown_cbs(void)
+{
     for (int i = s_ncbs - 1; i >= 0; i--) {
         s_cbs[i]();
     }
     rails_off();
+}
+
+void power_restart(void)
+{
+    claim_shutdown();
+    ESP_LOGW(TAG, "Restarting (power stays latched)...");
+    run_shutdown_cbs();
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    esp_restart();   /* the latch pad is held and s_latched_magic set: the boot resumes */
+    for (;;) {
+    }
+}
+
+static void __attribute__((noreturn)) shutdown(bool flash)
+{
+    claim_shutdown();
+    ESP_LOGI(TAG, "Shutting down...");
+    status_led_set(flash ? LED_ORANGE : LED_OFF);
+    run_shutdown_cbs();
     /* Stop the "on" breathe / any app pattern; charge-only mode re-applies D2 if on USB. */
     status_led_set_mode(LED_IDX_STATUS, LED_MODE_OFF, LED_OFF);
     status_led_set_mode(LED_IDX_CHARGE, LED_MODE_OFF, LED_OFF);

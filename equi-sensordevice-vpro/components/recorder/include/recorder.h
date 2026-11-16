@@ -32,6 +32,9 @@
 typedef struct {
     const char *device_id;   /* backend ID, e.g. "50787DFFFE15B0B4" (file names, EDF header) */
     uint64_t session;        /* Unix time in ms */
+    uint64_t file_id;        /* last field of the file names; 0 = the session ID. A session
+                              * resumed after a reset gives its restart time (ms), so the files
+                              * written before the reset are not overwritten */
     uint32_t epoch;          /* Unix time now, 0 = unknown */
     const char *horse;       /* 15-digit chip number, NULL = unknown */
     uint16_t ecg_rate_hz;    /* 256 / 512, 0 = no ECG file */

@@ -116,7 +116,9 @@ void prov_request_and_restart(void)
     }
     ESP_LOGI(TAG, "provisioning requested: restarting");
     status_led_flash(LED_WHITE, 3, 150, 150);
-    esp_restart();   /* the power latch survives a software reset */
+    /* Not a bare esp_restart(): a session may be running, so recordings are closed and the SD
+     * card unmounted first. The power latch survives the software reset. */
+    power_restart();
 }
 
 /* ----------------------------------------------------------- provisioning */

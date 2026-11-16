@@ -252,10 +252,12 @@ static void rfid_task(void *arg)
     } else {
         ESP_LOGI(TAG, "scan %s, no tag", s_cancel ? "cancelled" : "timed out");
     }
-    s_busy = false;
+    /* Busy until the callback has returned: it can take a second or more (buzz, session and
+     * recording start), and a new scan started meanwhile would overlap it. */
     if (s_cb) {
         s_cb(done ? &tag : NULL, s_ctx);
     }
+    s_busy = false;
     vTaskDelete(NULL);
 }
 
