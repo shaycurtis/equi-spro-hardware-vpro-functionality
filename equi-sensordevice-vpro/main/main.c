@@ -14,6 +14,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/time.h>
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -167,13 +168,22 @@ static uint32_t now_epoch(void)
     return sensors_get_epoch(&epoch) == ESP_OK ? epoch : 0;   /* 0 = RTC has no time */
 }
 
-/* Session ID = Unix time in milliseconds, as the VPro platform uses (the RTC has 1 s
- * resolution, so the last three digits are 000). */
+/* Session ID = Unix time in milliseconds, as the VPro platform uses. The RTC is set to a
+ * whole second, but the system clock then runs, so the milliseconds are real. A plain
+ * epoch*1000 is a multiple of 1000, and the advert's session tag is the low byte of this
+ * ID: those low bytes take only 32 values. */
 static uint64_t new_session_id(void)
 {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if (tv.tv_sec >= 1704067200) {   /* 2024-01-01: the clock was set (same check as the uploader) */
+        return (uint64_t)tv.tv_sec * 1000ull + (uint32_t)(tv.tv_usec / 1000);
+    }
     uint32_t epoch = now_epoch();
     if (epoch) {
-        return (uint64_t)epoch * 1000u;
+        /* RTC is set but the system clock is not. Still not a multiple of 1000. */
+        uint32_t ms = (uint32_t)((esp_timer_get_time() / 1000) % 1000);
+        return (uint64_t)epoch * 1000ull + (ms ? ms : 1);
     }
     return SESSION_RANDOM_BIT | esp_random();   /* RTC has no time: random, flagged by bit 52 */
 }
@@ -318,6 +328,7 @@ static void cloud_show(cloud_show_t st)
 static void on_charge_only(void)
 {
     device_id_get();           /* opens NVS (saved networks) */
+    telemetry_boot_health();   /* charge-only boot (for example after a brownout) still counts */
     if (sensors_init() != ESP_OK) {
         ESP_LOGW(TAG, "sensors unavailable for the charging telemetry");
     }
@@ -552,6 +563,8 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
         .temp_c100 = s->th_ok ? (int16_t)lroundf(s->temp_c * 100.0f) : 0x7FFF,
         .humidity_half = s->th_ok ? (uint8_t)lroundf(s->rh * 2.0f) : 0xFF,
         .horse_temp_c100 = s_probe_ok ? (int16_t)lroundf(s_probe_c * 100.0f) : 0x7FFF,
+        .reset_reason = telemetry_reset_reason(),
+        .crash_count = telemetry_crash_count(),
         .steps = steps,
         .position = s->imu_ok ? s->position : 0,
         .positions_seen = s->imu_ok ? s->positions_seen : 0,
@@ -646,6 +659,7 @@ void app_main(void)
     power_start();
 
     s_dev_id = strtoul(device_id_get(), NULL, 16) & 0xFFFFFF;
+    telemetry_boot_health();   /* crash count and reset reason; no-op if charge-only already did it */
     gnss_standby_async();
 
     char name[24];

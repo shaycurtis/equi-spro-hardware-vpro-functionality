@@ -7,13 +7,16 @@
  * with company ID 0xFFFF (Bluetooth SIG "test / not assigned" - replace with an Equimetrics
  * company ID for production).
  *
- * ADVERT - live data, every 60 s (23 bytes after the company ID, little-endian unless noted):
+ * ADVERT - live data, every 60 s (24 bytes after the company ID, little-endian unless noted):
  *   off len field
  *    0   1  magic        0xE9
  *    1   1  version      0x06
  *    2   3  device_id    24-bit, BIG-endian (so 0x15B0B4 reads as "15B0B4")
  *    5   1  session_tag  low byte of the session ID: tells the gateway which session (from the
- *                        encrypted identity below) this reading belongs to
+ *                        encrypted identity below) this reading belongs to. The ID is Unix time
+ *                        in ms, including the milliseconds. A multiple of 1000 has only 32
+ *                        distinct low bytes (1000 and 256 share a factor of 8), so the tag would
+ *                        otherwise repeat every 32 s.
  *    6   1  seq          increments every sample (gateway de-duplicates on session + seq)
  *    7   1  flags        bit0 USB present, bit1 charging, bit2 charge full, bit3 charger fault,
  *                        bit4 RTC time valid, bit5 RFID scan in progress,
@@ -32,7 +35,13 @@
  *   21   2  horse_temp   int16, 0.01 degC, external DS18B20 probe on the 1-Wire connector pin,
  *                        0x7FFF = no probe. Optional: added to v6 without a version change, so
  *                        decoders that read 21 bytes still work; firmware before it sends 21
- *  (1 byte spare in the 31-byte advert)
+ *   23   1  health       optional, the same way: decoders that read 23 bytes still work;
+ *                        firmware before it sends 23. bits 0-3 = reset reason of this boot
+ *                        (esp_reset_reason_t, 0..15);
+ *                        bits 4-7 = crash count, saturating at 15 (15 means 15 or more). A crash
+ *                        is a panic, a watchdog, a brownout, a power glitch or a CPU lockup;
+ *                        power-on and software restart do not add to it. The count is kept in
+ *                        NVS. This byte fills the legacy advert (31 bytes on air).
  *  v5 = v6 without position. v4 = v5 with a 4-byte session ID at offset 5 and everything after shifted by 3. v3 = v4 without
  *  heart_rate. v2 = v3 with battery_soc as 1 byte of whole %.
  *
@@ -59,7 +68,8 @@
 #define TELEMETRY_COMPANY_ID   0xFFFF
 #define TELEMETRY_MAGIC        0xE9
 #define TELEMETRY_VERSION      6
-#define TELEMETRY_PAYLOAD_LEN  23
+#define TELEMETRY_PAYLOAD_LEN  24
+#define TELEMETRY_CRASH_MAX    15   /* high nibble of the health byte; 15 means this or more */
 #define TELEMETRY_IDENTITY     0x83
 #define TELEMETRY_IDENTITY_LEN 27
 
@@ -102,9 +112,17 @@ typedef struct {
     uint8_t  position;         /* 0..5 (VPro numbering), 0 = unknown */
     uint8_t  positions_seen;   /* bit n = position n held since the last reading */
     int16_t  horse_temp_c100;  /* external probe, 0.01 degC, 0x7FFF = no probe */
+    uint8_t  reset_reason;     /* esp_reset_reason_t of this boot; low 4 bits are sent */
+    uint16_t crash_count;      /* NVS total; the advert saturates it at TELEMETRY_CRASH_MAX */
 } telemetry_t;
 
 void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN]);
+
+/* Remember this boot's reset reason and, if it was a crash, add one to the NVS counter.
+ * Call once NVS is up (device_id_get opens it). A second call in the same boot does nothing. */
+void telemetry_boot_health(void);
+uint8_t telemetry_reset_reason(void);
+uint16_t telemetry_crash_count(void);
 
 /* Set the Bluetooth address (the chip's BT MAC + an offset, as VPro). Call before NimBLE starts;
  * telemetry_ble_init() does, and so does BLE provisioning, so both use the same address. Copies

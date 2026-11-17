@@ -27,6 +27,11 @@ static const char *TAG = "recorder";
 #define OFF_NRECORDS   236
 #define STARVE_RECORDS 10                   /* a signal this far behind the others is padded */
 #define TAL_SAMPLES    60                   /* EDF Annotations signal: 120 bytes per record (as VPro) */
+/* A sensor FIFO cannot hold a second of unread samples (ECG FIFO is 32 deep; the IMU watermark
+ * is 128 words). A longer gap means that signal has stopped. A file switch waits only this
+ * long for samples still in a FIFO, then closes on what it has: otherwise one dead signal
+ * (its head never reaches the projected switch point) stalls every file. */
+#define SWITCH_CATCHUP_US 1000000
 
 /* ------------------------------------------------------------ data model */
 
@@ -82,6 +87,7 @@ static int64_t s_t0;                        /* session start (esp_timer): sample
 static SemaphoreHandle_t s_lock;            /* guards the switch request */
 static meta_t s_cur, s_next;
 static bool s_switch_pending;
+static int64_t s_switch_deadline;           /* esp_timer time: stop waiting for a dead signal */
 static volatile bool s_stopping, s_closed;
 static TaskHandle_t s_task;
 static int16_t *s_chunk;
@@ -406,14 +412,18 @@ static void writer_task(void *arg)
         xSemaphoreTake(s_lock, portMAX_DELAY);
         bool switching = s_switch_pending;
         meta_t next = s_next;
+        int64_t deadline = s_switch_deadline;
         xSemaphoreGive(s_lock);
 
         if (switching) {
-            if (!switch_ready() && !s_stopping) {
+            if (!switch_ready() && !s_stopping && esp_timer_get_time() < deadline) {
                 /* a sensor still holds samples from before the switch in its FIFO */
-                vTaskDelay(pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(50));
                 xTaskNotifyGive(xTaskGetCurrentTaskHandle());
                 continue;
+            }
+            if (!switch_ready() && !s_stopping) {
+                ESP_LOGW(TAG, "file switch: a signal has stopped; closing on the samples in hand");
             }
             for (int k = 0; k < s_nstreams; k++) {
                 stream_t *st = s_streams[k];
@@ -587,18 +597,24 @@ void recorder_new_session(uint64_t session, uint32_t epoch, const char *horse)
     int64_t now = esp_timer_get_time();
     xSemaphoreTake(s_lock, portMAX_DELAY);
     /* Each signal switches at the sample taken now: the last pushed one plus what the sensor
-     * has produced since (still waiting in its FIFO). */
+     * has produced since (still waiting in its FIFO). A signal that has already stopped is
+     * not projected forward: those samples do not exist, and waiting for them never ends. */
     for (int k = 0; k < s_nstreams; k++) {
         for (int i = 0; i < s_streams[k]->nsig; i++) {
             sig_t *s = &s_streams[k]->sig[i];
             uint32_t head = __atomic_load_n(&s->head, __ATOMIC_ACQUIRE);
-            int64_t dt = now - s->head_us;
-            s->switch_at = head + (head && dt > 0 ? (uint32_t)lroundf(dt / 1e6f * s->rate) : 0);
+            int64_t dt = s->head_us ? now - s->head_us : 0;
+            uint32_t ahead = 0;
+            if (head && dt > 0 && dt <= SWITCH_CATCHUP_US) {
+                ahead = (uint32_t)lroundf(dt / 1e6f * s->rate);
+            }
+            s->switch_at = head + ahead;
         }
     }
     s_next = (meta_t){ .session = session, .file_id = session, .epoch = epoch };
     set_horse(&s_next, horse);
     s_switch_pending = true;
+    s_switch_deadline = now + SWITCH_CATCHUP_US;
     xSemaphoreGive(s_lock);
     xTaskNotifyGive(s_task);
 }
