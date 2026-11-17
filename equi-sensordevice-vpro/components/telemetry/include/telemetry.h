@@ -13,7 +13,10 @@
  *    1   1  version      0x06
  *    2   3  device_id    24-bit, BIG-endian (so 0x15B0B4 reads as "15B0B4")
  *    5   1  session_tag  low byte of the session ID: tells the gateway which session (from the
- *                        encrypted identity below) this reading belongs to
+ *                        encrypted identity below) this reading belongs to. The ID is Unix time
+ *                        in ms, including the milliseconds. A multiple of 1000 has only 32
+ *                        distinct low bytes (1000 and 256 share a factor of 8), so the tag would
+ *                        otherwise repeat every 32 s.
  *    6   1  seq          increments every sample (gateway de-duplicates on session + seq)
  *    7   1  flags        bit0 USB present, bit1 charging, bit2 charge full, bit3 charger fault,
  *                        bit4 RTC time valid, bit5 RFID scan in progress,
@@ -32,7 +35,7 @@
  *   21   2  horse_temp   int16, 0.01 degC, external DS18B20 probe on the 1-Wire connector pin,
  *                        0x7FFF = no probe. Optional: added to v6 without a version change, so
  *                        decoders that read 21 bytes still work; firmware before it sends 21
- *  (1 byte spare in the 31-byte advert)
+ *  (1 byte spare in the 31-byte advert, reserved for later health stats)
  *  v5 = v6 without position. v4 = v5 with a 4-byte session ID at offset 5 and everything after shifted by 3. v3 = v4 without
  *  heart_rate. v2 = v3 with battery_soc as 1 byte of whole %.
  *

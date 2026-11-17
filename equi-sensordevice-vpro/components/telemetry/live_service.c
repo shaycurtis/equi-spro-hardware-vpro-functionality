@@ -447,6 +447,21 @@ void live_service_on_disconnect(uint16_t conn)
     }
     s_conn = BLE_HS_CONN_HANDLE_NONE;
     s_sub_ecg = s_sub_hr = s_sub_recid = s_sub_status = s_sub_totdur = false;
+    /* A timed recording keeps its timer (it finishes on time; the app sees that on reconnect).
+     * One with no duration has nobody left to send "stop", so it would run until the battery
+     * died. Save what was recorded and end it. */
+    bool open_ended = false;
+    portENTER_CRITICAL(&s_mux);
+    if (s_running && s_until_us == 0) {
+        s_running = false;
+        s_total_s = 0;
+        open_ended = true;
+    }
+    portEXIT_CRITICAL(&s_mux);
+    if (open_ended) {
+        end_recording(true);
+        set_status("stopped");
+        ESP_LOGI(TAG, "app disconnected during an open-ended recording: saved and stopped");
+    }
     apply();
-    /* A recording keeps its timer (it finishes on time); the app sees the status on reconnect. */
 }

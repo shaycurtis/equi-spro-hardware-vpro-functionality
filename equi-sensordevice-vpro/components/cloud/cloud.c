@@ -335,9 +335,20 @@ typedef struct {
     char horse[32];
     uint64_t session, started, ended;
     long size;
+    long records;        /* EDF data-record count; -1 = header never updated, 0 = none */
+    long header_bytes;   /* header's own length (offset 184); 0 = not read */
 } upload_file_t;
 
 static bool ok2xx(int status) { return status / 100 == 2; }
+
+/* A file whose header says there are no data records, and whose length is only that header.
+ * Opening a file writes the header at once; a session that never got a sample (or a switch
+ * that closed before the first flush of an idle stream) leaves one of these. Uploading it
+ * asks the backend to process an empty recording. */
+static bool header_only(const upload_file_t *f)
+{
+    return f->records <= 0 && f->header_bytes >= 512 && f->size > 0 && f->size <= f->header_bytes;
+}
 
 static bool parse_file(const char *dir, const char *session_dir, const char *name, upload_file_t *f)
 {
@@ -362,17 +373,19 @@ static bool parse_file(const char *dir, const char *session_dir, const char *nam
     if (!fp) {
         return false;
     }
-    /* EDF header: number of data records at 236, record duration (s) at 244, 8 ASCII each.
-     * endedAt = startedAt + records x duration (VPro: startedAt + the file duration). */
+    /* EDF header: byte count at 184, number of data records at 236, record duration (s) at 244,
+     * 8 ASCII each. endedAt = startedAt + records x duration (VPro: startedAt + the file duration). */
     char hdr[256];
     if (fread(hdr, 1, sizeof(hdr), fp) == sizeof(hdr)) {
-        char nrec[9] = { 0 }, dur[9] = { 0 };
+        char nbytes[9] = { 0 }, nrec[9] = { 0 }, dur[9] = { 0 };
+        memcpy(nbytes, hdr + 184, 8);
         memcpy(nrec, hdr + 236, 8);
         memcpy(dur, hdr + 244, 8);
-        long n = strtol(nrec, NULL, 10);
+        f->header_bytes = strtol(nbytes, NULL, 10);
+        f->records = strtol(nrec, NULL, 10);
         double d = strtod(dur, NULL);
-        if (n > 0 && d > 0) {
-            f->ended = f->started + (uint64_t)(n * d * 1000.0 + 0.5);
+        if (f->records > 0 && d > 0) {
+            f->ended = f->started + (uint64_t)(f->records * d * 1000.0 + 0.5);
         }
     }
     fseek(fp, 0, SEEK_END);
@@ -499,8 +512,8 @@ static int upload_once(const upload_file_t *f, char *resp)
     return api_post(path, NULL, NULL, 0);
 }
 
-/* Upload every recording on the card (send false: only count them). Returns the number of
- * recordings still there. */
+/* Upload every recording on the card (send false: only count them). Header-only files are
+ * removed either way. Returns the number of recordings still there. */
 static int walk_files(bool send)
 {
     if (!storage_mounted() && storage_init() != ESP_OK) {
@@ -541,6 +554,13 @@ static int walk_files(bool send)
                 ESP_LOGW(TAG, "skipping %s/%s (not a recording, or empty)", s->d_name, e->d_name);
                 continue;
             }
+            if (header_only(f)) {
+                ESP_LOGW(TAG, "removing %s (header only, no records)", f->path);
+                if (unlink(f->path) != 0) {
+                    ESP_LOGW(TAG, "could not remove %s", f->path);
+                }
+                continue;
+            }
             if (!send) {
                 left++;
                 continue;
@@ -565,7 +585,7 @@ static int walk_files(bool send)
             }
         }
         closedir(d);
-        if (send && rmdir(dir) == 0) {   /* only succeeds once the folder is empty */
+        if (rmdir(dir) == 0) {   /* only succeeds once the folder is empty */
             ESP_LOGI(TAG, "session folder %s done", s->d_name);
         }
     }
