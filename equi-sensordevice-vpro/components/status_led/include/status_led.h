@@ -20,7 +20,7 @@ typedef struct { uint8_t r, g, b; } led_colour_t;
 #define LED_BLUE    ((led_colour_t){ 0, 0, 24 })
 #define LED_ORANGE  ((led_colour_t){ 24, 8, 0 })
 #define LED_WHITE   ((led_colour_t){ 10, 10, 10 })
-#define LED_PURPLE  ((led_colour_t){ 16, 0, 24 })   /* reserved: OTA update (later) */
+#define LED_PURPLE  ((led_colour_t){ 16, 0, 24 })   /* firmware update (download, then restart) */
 #define LED_RUNNING ((led_colour_t){ 0, 10, 40 })   /* "device on" colour (pulse / breathe peak) */
 #define LED_LINKED  ((led_colour_t){ 0, 32, 4 })    /* heartbeat colour while a gateway hears us */
 

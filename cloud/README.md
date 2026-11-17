@@ -275,3 +275,78 @@ Notes:
   full NVS cannot leave a certificate in AWS that the device could not store.
 - If a device's NVS identity is ever lost it provisions again: the thing keeps its name and gets a
   new certificate; deactivate the old one in the console.
+
+## Firmware updates (AWS IoT Jobs, sensors)
+
+Phase 6 of `REMOTE_SETTINGS_PLAN.md`. A sensor checks for a job at the end of each charging round
+(after its shadow), downloads the image, restarts into it, and reports SUCCEEDED once the new
+firmware has reached AWS IoT. The sensor policy (`equimetrics-sensor`) already allows the Jobs
+topics, so only the pieces below are new. Console, region eu-west-1.
+
+**Versions.** The firmware takes its version from git (`equi-sensordevice-vpro/CMakeLists.txt`):
+tag `sensor-v0.2.0` -> `0.2.0`; untagged builds read like `0.1.0-g32e226e` (`-dirty` with
+uncommitted changes). The job's `"version"` must equal the image's version exactly, or the device
+refuses the image. The device's current version is `reported.fw` in its shadow.
+
+**1. Firmware bucket.** S3 -> Create bucket, e.g. **`equimetrics-sensor-firmware-dev`**, eu-west-1,
+*Block all public access* on (the default). Nothing else.
+
+**2. Pre-signing role.** IAM -> Roles -> Create role -> *AWS service* -> **IoT** (use case "IoT").
+Name **`equimetrics-iot-jobs-presign`**. Then add an inline policy (put in the bucket name):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::equimetrics-sensor-firmware-dev/sensor/*" }
+  ]
+}
+```
+
+AWS IoT uses this role to make a download link, valid for up to an hour, each time a device
+fetches its job; the bucket itself stays private.
+
+**3. Thing groups.** IoT Core -> Manage -> Thing groups -> Create -> *Static*:
+**`sensors-bench`** (add `equi-sensor-DCB4D9FFFE0840E8`); later **`sensors-pilot`** (all three
+boards) and **`sensors-fleet`**.
+
+**4. A release.**
+1. Commit, `git tag sensor-v0.2.0`, build, and check the signature (`espsecure verify-signature`,
+   README "Build and flash"). The log line `Firmware version: 0.2.0` comes from cmake.
+2. Upload `equi-sensordevice-vpro/build/equi-sensordevice-vpro.bin` to
+   `s3://equimetrics-sensor-firmware-dev/sensor/0.2.0/equi-sensordevice-vpro.bin`.
+3. Job document (save it as a `.json` file; the console takes it from S3, e.g.
+   `sensor/0.2.0/job.json`):
+
+```json
+{
+  "operation": "ota",
+  "version": "0.2.0",
+  "url": "${aws:iot:s3-presigned-url:https://equimetrics-sensor-firmware-dev.s3.eu-west-1.amazonaws.com/sensor/0.2.0/equi-sensordevice-vpro.bin}"
+}
+```
+
+**5. The job.** IoT Core -> Manage -> Remote actions -> Jobs -> Create job -> *Create custom job*:
+- Name e.g. `sensor-fw-0-2-0-bench`; targets: thing group `sensors-bench`.
+- Job file: the `job.json` above. **Pre-sign resource URLs:** on, role
+  `equimetrics-iot-jobs-presign`, link valid 3600 s.
+- Job run type: *Snapshot* (only the group's members now) or *Continuous* (also devices added to
+  the group later).
+- Timeout: in-progress timeout of e.g. 60 min (a device only starts when it is charging; queued
+  jobs wait for it). For a group of many: a rollout rate and an abort rule (e.g. abort when more
+  than 10 % fail).
+
+**6. Watch it.** The job's *Job executions* tab shows each device: QUEUED until its next charging
+round, then IN_PROGRESS (`try` 1..3 in its status details), then SUCCEEDED (or FAILED after 3
+tries, or REJECTED for a document it does not understand). On the device: D2 breathes **purple**
+during the download; the log shows `job ...: operation ota, version 0.2.0`, `firmware download:
+25 % ...`, `restarting into the new firmware`, then after the restart `new firmware 0.2.0
+confirmed (reached AWS IoT)` and `job ... -> SUCCEEDED`.
+
+Notes:
+- The device refuses a job whose image has a different version than the document says, and the
+  bootloader refuses an image not signed with the **spro** key.
+- If the new firmware cannot reach AWS IoT, it is not confirmed, and the next restart goes back
+  to the previous one; the job then tries again (up to 3 times).
+- On a board's first update the image goes to `ota_0`, which overwrites the original SPro app.

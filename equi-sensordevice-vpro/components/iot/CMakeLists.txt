@@ -1,6 +1,7 @@
 idf_component_register(SRCS "iot.c"
                        INCLUDE_DIRS "include"
-                       PRIV_REQUIRES nvs_flash mbedtls esp_event)
+                       PRIV_REQUIRES nvs_flash mbedtls esp_event esp_timer app_update esp_https_ota esp_http_client
+                                     esp_app_format)
 
 # ---- Secrets from the git-ignored <repo>/private/ (never committed) ---------------------------
 set(REPO_DIR ${CMAKE_CURRENT_LIST_DIR}/../../..)

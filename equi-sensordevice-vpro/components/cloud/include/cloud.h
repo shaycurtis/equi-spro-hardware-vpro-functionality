@@ -43,6 +43,7 @@ typedef enum {
     CLOUD_SHOW_UPLOADING,    /* sending recordings */
     CLOUD_SHOW_SYNCED,       /* connected, report sent, nothing left to upload */
     CLOUD_SHOW_FAILED,       /* Wi-Fi or the backend failed: retrying */
+    CLOUD_SHOW_UPDATING,     /* downloading new firmware (AWS IoT Jobs), then a restart */
 } cloud_show_t;
 
 typedef struct {

@@ -23,6 +23,7 @@
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "iot.h"
 #include "provisioning.h"
@@ -624,8 +625,16 @@ static void shadow_status(cJSON *reported)
     cJSON_AddNumberToObject(reported, "reported_at", (double)(now_ms() / 1000));
 }
 
-static const iot_shadow_t k_shadow = {
+static void show(cloud_show_t state);
+
+static void iot_updating(void)
+{
+    show(CLOUD_SHOW_UPDATING);
+}
+
+static const iot_cfg_t k_shadow = {
     .apply = shadow_apply, .settings = shadow_settings, .status = shadow_status,
+    .updating = iot_updating,
 };
 
 /* ------------------------------------------------------------------- task */
@@ -707,6 +716,14 @@ static void cloud_task(void *arg)
                 iot_sync(s_cfg.device_id, &k_shadow);
             }
             wifi_off();
+            if (iot_restart_required()) {
+                /* New firmware written: close the card and start it (charge-only again, on USB).
+                 * It confirms itself once it reaches AWS IoT, else the bootloader rolls back. */
+                ESP_LOGW(TAG, "restarting into the new firmware");
+                storage_shutdown();
+                vTaskDelay(pdMS_TO_TICKS(200));
+                esp_restart();
+            }
         }
         uint32_t wait_s;
         if (!ok) {

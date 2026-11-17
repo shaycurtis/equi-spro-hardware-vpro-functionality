@@ -11,8 +11,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "cJSON.h"
+#include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
+#include "esp_http_client.h"
+#include "esp_https_ota.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_timer.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/x509_csr.h"
 #include "mqtt_client.h"
@@ -349,7 +354,7 @@ static cJSON *request_any(esp_mqtt_client_handle_t c, const char *topic, const c
  *                                                          rejected {code:404} (no shadow yet)
  *   $aws/things/<thing>/shadow/name/config/update   {state:{reported[,desired]}} -> accepted | rejected
  */
-static esp_err_t shadow_sync(esp_mqtt_client_handle_t c, const char *thing, const iot_shadow_t *sh)
+static esp_err_t shadow_sync(esp_mqtt_client_handle_t c, const char *thing, const iot_cfg_t *sh)
 {
     char t_get[160], t_upd[160];
     snprintf(t_get, sizeof(t_get), "$aws/things/%s/shadow/name/config/get", thing);
@@ -510,9 +515,247 @@ out:
 }
 #endif
 
+/* ------------------------------------------------- firmware updates (Jobs) */
+
+#define OTA_KEY          "ota"     /* NVS (namespace "iot"): the job in progress */
+#define OTA_ID_LEN       65        /* job IDs are up to 64 characters */
+#define OTA_VER_LEN      32        /* esp_app_desc_t.version */
+#define OTA_HTTP_TIMEOUT 30000
+
+typedef struct {
+    char job_id[OTA_ID_LEN];
+    char version[OTA_VER_LEN];
+    uint8_t tries;               /* downloads started for this job */
+} ota_state_t;
+
+static volatile bool s_restart;
+
+static const char *running_version(void)
+{
+    return esp_app_get_description()->version;
+}
+
+static bool ota_state_load(ota_state_t *st)
+{
+    memset(st, 0, sizeof(*st));
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t len = sizeof(*st);
+    bool ok = nvs_get_blob(h, OTA_KEY, st, &len) == ESP_OK && len == sizeof(*st);
+    nvs_close(h);
+    st->job_id[OTA_ID_LEN - 1] = st->version[OTA_VER_LEN - 1] = 0;
+    return ok && st->job_id[0];
+}
+
+static void ota_state_save(const ota_state_t *st)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_set_blob(h, OTA_KEY, st, sizeof(*st)) == ESP_OK) {
+            nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+}
+
+static void ota_state_clear(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_erase_key(h, OTA_KEY) == ESP_OK) {   /* only our own key */
+            nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+}
+
+/* A new image runs "pending verify" until confirmed; reset before that and the bootloader goes
+ * back to the previous one. Getting to AWS is the confirmation. */
+static void confirm_new_image(void)
+{
+    esp_ota_img_states_t state;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGW(TAG, "new firmware %s confirmed (reached AWS IoT): %s", running_version(), esp_err_to_name(err));
+    }
+}
+
+/* $aws/things/<thing>/jobs/<id>/update with a status and one detail (statusDetails are strings). */
+static void job_update(esp_mqtt_client_handle_t c, const char *thing, const char *job_id, const char *status,
+                       const char *key, const char *value)
+{
+    char topic[200];
+    snprintf(topic, sizeof(topic), "$aws/things/%s/jobs/%s/update", thing, job_id);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "status", status);
+    cJSON *d = cJSON_AddObjectToObject(r, "statusDetails");
+    cJSON_AddStringToObject(d, "fw", running_version());
+    if (key && value) {
+        cJSON_AddStringToObject(d, key, value);
+    }
+    char *body = cJSON_PrintUnformatted(r);
+    cJSON_Delete(r);
+    if (!body) {
+        return;
+    }
+    bool rejected;
+    cJSON *resp = request_any(c, topic, body, &rejected);
+    ESP_LOGI(TAG, "job %s -> %s%s", job_id, status, !resp ? " (no answer)" : rejected ? " (rejected)" : "");
+    if (resp && rejected) {
+        ESP_LOGW(TAG, "job update rejected: %s", s_rx.buf);
+    }
+    cJSON_Delete(resp);
+    cJSON_free(body);
+}
+
+/*
+ * Check the jobs. On return *url (heap) is set if an image should be downloaded now, with
+ * *version the version it must carry. The job is left IN_PROGRESS: SUCCEEDED is reported from the
+ * new firmware after the restart.
+ */
+static esp_err_t jobs_sync(esp_mqtt_client_handle_t c, const char *thing, char **url, char version[OTA_VER_LEN])
+{
+    *url = NULL;
+    char t_start[160], t_upd[160];
+    snprintf(t_start, sizeof(t_start), "$aws/things/%s/jobs/start-next", thing);
+    snprintf(t_upd, sizeof(t_upd), "$aws/things/%s/jobs/+/update", thing);
+    const char *const topics[] = { t_start, t_upd };
+    if (!subscribe_responses(c, topics, 2)) {
+        ESP_LOGW(TAG, "jobs: subscribe failed (sensor policy?)");
+        return ESP_FAIL;
+    }
+    const char *running = running_version();
+
+    /* An update started before the restart and now running: done. */
+    ota_state_t st;
+    bool have = ota_state_load(&st);
+    if (have && strcmp(st.version, running) == 0) {
+        job_update(c, thing, st.job_id, "SUCCEEDED", "result", "updated");
+        ota_state_clear();
+        have = false;
+    }
+
+    /* The next job (QUEUED or already IN_PROGRESS); start-next marks it IN_PROGRESS. */
+    char req[96];
+    snprintf(req, sizeof(req), "{\"statusDetails\":{\"fw\":\"%s\"}}", running);
+    bool rejected;
+    cJSON *resp = request_any(c, t_start, req, &rejected);
+    if (!resp || rejected) {
+        ESP_LOGW(TAG, "jobs: start-next %s", resp ? "rejected" : "not answered");
+        cJSON_Delete(resp);
+        return ESP_FAIL;
+    }
+    const cJSON *ex = cJSON_GetObjectItem(resp, "execution");
+    const cJSON *jid = cJSON_GetObjectItem(ex, "jobId");
+    if (!cJSON_IsString(jid)) {
+        ESP_LOGI(TAG, "jobs: none pending");
+        if (have) {
+            ota_state_clear();   /* that job was cancelled or finished elsewhere */
+        }
+        cJSON_Delete(resp);
+        return ESP_OK;
+    }
+    const char *job_id = jid->valuestring;
+    const cJSON *doc = cJSON_GetObjectItem(ex, "jobDocument");
+    const cJSON *op = cJSON_GetObjectItem(doc, "operation");
+    const cJSON *ver = cJSON_GetObjectItem(doc, "version");
+    const cJSON *u = cJSON_GetObjectItem(doc, "url");
+    ESP_LOGI(TAG, "job %s: operation %s, version %s (running %s)", job_id,
+             cJSON_IsString(op) ? op->valuestring : "?", cJSON_IsString(ver) ? ver->valuestring : "?", running);
+
+    if (!cJSON_IsString(op) || strcmp(op->valuestring, "ota") != 0) {
+        job_update(c, thing, job_id, "REJECTED", "reason", "unknown operation");
+    } else if (!cJSON_IsString(ver) || !ver->valuestring[0] || strlen(ver->valuestring) >= OTA_VER_LEN ||
+               !cJSON_IsString(u) || strncmp(u->valuestring, "https://", 8) != 0) {
+        job_update(c, thing, job_id, "REJECTED", "reason", "needs \"version\" and an https \"url\"");
+    } else if (strcmp(ver->valuestring, running) == 0) {
+        job_update(c, thing, job_id, "SUCCEEDED", "result", "already running");
+        ota_state_clear();
+    } else {
+        uint8_t tries = have && strcmp(st.job_id, job_id) == 0 ? st.tries : 0;
+        if (tries >= IOT_OTA_MAX_TRIES) {
+            job_update(c, thing, job_id, "FAILED", "reason", "download or new firmware failed 3 times");
+            ota_state_clear();
+        } else {
+            ota_state_t next = { .tries = (uint8_t)(tries + 1) };
+            strlcpy(next.job_id, job_id, sizeof(next.job_id));
+            strlcpy(next.version, ver->valuestring, sizeof(next.version));
+            ota_state_save(&next);   /* before the download: a failure or rollback counts */
+            char n[8];
+            snprintf(n, sizeof(n), "%u", next.tries);
+            job_update(c, thing, job_id, "IN_PROGRESS", "try", n);
+            strlcpy(version, ver->valuestring, OTA_VER_LEN);
+            *url = strdup(u->valuestring);
+        }
+    }
+    cJSON_Delete(resp);
+    return ESP_OK;
+}
+
+/* Download the image into the next OTA slot and set it to boot. Its version must be `version`;
+ * esp_https_ota_finish -> esp_ota_end checks the secure boot signature. */
+static esp_err_t ota_download(const char *url, const char *version)
+{
+    esp_http_client_config_t hc = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = OTA_HTTP_TIMEOUT,
+        .buffer_size = 4096,
+        .buffer_size_tx = 8192,       /* the pre-signed URL goes in the request line */
+        .keep_alive_enable = true,
+    };
+    esp_https_ota_config_t oc = { .http_config = &hc };
+    esp_https_ota_handle_t h = NULL;
+    int64_t t0 = esp_timer_get_time();
+    ESP_LOGI(TAG, "firmware %s: downloading", version);
+    esp_err_t err = esp_https_ota_begin(&oc, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "firmware download: %s", esp_err_to_name(err));
+        return err;
+    }
+    esp_app_desc_t d;
+    err = esp_https_ota_get_img_desc(h, &d);
+    if (err == ESP_OK && strncmp(d.version, version, sizeof(d.version)) != 0) {
+        ESP_LOGE(TAG, "firmware download: the image is version %s, the job says %s", d.version, version);
+        err = ESP_ERR_INVALID_VERSION;
+    }
+    int next_pct = 25;
+    while (err == ESP_OK) {
+        err = esp_https_ota_perform(h);
+        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+            break;
+        }
+        err = ESP_OK;
+        int total = esp_https_ota_get_image_size(h), got = esp_https_ota_get_image_len_read(h);
+        if (total > 0 && got * 100 / total >= next_pct) {
+            ESP_LOGI(TAG, "firmware download: %d %%", got * 100 / total);
+            next_pct += 25;
+        }
+    }
+    if (err == ESP_OK && !esp_https_ota_is_complete_data_received(h)) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    if (err != ESP_OK) {
+        esp_https_ota_abort(h);
+        ESP_LOGE(TAG, "firmware download failed: %s (the job retries next round)", esp_err_to_name(err));
+        return err;
+    }
+    err = esp_https_ota_finish(h);   /* verifies the image (signature) and sets it to boot */
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "firmware image rejected: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGW(TAG, "firmware %s written in %lld ms: restart to run it", version,
+             (esp_timer_get_time() - t0) / 1000);
+    return ESP_OK;
+}
+
 /* --------------------------------------------------------------------- API */
 
-esp_err_t iot_sync(const char *device_id, const iot_shadow_t *shadow)
+esp_err_t iot_sync(const char *device_id, const iot_cfg_t *cfg)
 {
     static bool warned;
 #ifndef IOT_ENDPOINT
@@ -561,10 +804,32 @@ esp_err_t iot_sync(const char *device_id, const iot_shadow_t *shadow)
         identity_free(&id);
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "connected to AWS IoT as thing \"%s\"", id.thing);
-    esp_err_t err = shadow && shadow->settings ? shadow_sync(c, id.thing, shadow) : ESP_OK;
+    ESP_LOGI(TAG, "connected to AWS IoT as thing \"%s\" (firmware %s)", id.thing, running_version());
+    confirm_new_image();   /* reaching AWS is this firmware's health check */
+    esp_err_t err = cfg && cfg->settings ? shadow_sync(c, id.thing, cfg) : ESP_OK;
+    char *ota_url = NULL;
+    char ota_version[OTA_VER_LEN] = "";
+    esp_err_t jerr = jobs_sync(c, id.thing, &ota_url, ota_version);
+    if (err == ESP_OK) {
+        err = jerr;
+    }
     client_stop(c);
     identity_free(&id);
+    if (ota_url) {
+        /* After the MQTT connection is closed: one TLS session at a time. */
+        if (cfg && cfg->updating) {
+            cfg->updating();
+        }
+        if (ota_download(ota_url, ota_version) == ESP_OK) {
+            s_restart = true;
+        }
+        free(ota_url);
+    }
     return err;
 #endif
+}
+
+bool iot_restart_required(void)
+{
+    return s_restart;
 }

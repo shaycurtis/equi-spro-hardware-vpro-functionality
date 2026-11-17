@@ -298,7 +298,7 @@ static void cloud_set_time(uint32_t epoch)
 }
 
 /* Charge-only LEDs: D1 (the more visible one) shows the charge, D2 the Wi-Fi / upload state.
- * Orange = Wi-Fi / upload problem (purple is kept for OTA updates later). */
+ * Orange = Wi-Fi / upload problem; purple breathing = downloading new firmware. */
 static void cloud_show(cloud_show_t st)
 {
     switch (st) {
@@ -317,6 +317,10 @@ static void cloud_show(cloud_show_t st)
     case CLOUD_SHOW_FAILED:
         power_charge_only_claim_status_led(true);
         status_led_set_mode(LED_IDX_CHARGE, LED_MODE_PULSE, LED_ORANGE);
+        break;
+    case CLOUD_SHOW_UPDATING:
+        power_charge_only_claim_status_led(true);
+        status_led_set_mode(LED_IDX_CHARGE, LED_MODE_BREATHE, LED_PURPLE);
         break;
     default:
         power_charge_only_claim_status_led(false);   /* back to the charge colour */

@@ -109,21 +109,52 @@ Code: `components/iot` (`iot_sync`, `shadow_sync`), `storage_config_update` /
   does for syslogs, or S3 through IoT).
 - **Done when:** a session's log is retrievable after charging.
 
+### Phase 6: firmware updates through AWS IoT Jobs (started 2026-11-17)
+Decided 2026-11-17: Jobs, not the shadow (groups, rollouts, abort rules, per-device status, and a
+fresh pre-signed download link made when the device fetches the job).
+- **Versioning:** the firmware version comes from git: tag `sensor-v<x.y.z>` -> `x.y.z`; commits
+  after a tag -> `x.y.z-N-g<hash>`; no tag yet -> `0.1.0-g<hash>`; `-dirty` for uncommitted changes.
+  It is what `reported.fw`, the charging report and the job document compare.
+- **Device, each charging round** (after the shadow): confirm a just-updated image once it reaches
+  AWS (else the bootloader rolls it back at the next reset); report SUCCEEDED for a job whose
+  version is now running; `start-next` gets the next job; a job document
+  `{"operation":"ota","version":"<x.y.z>","url":"${aws:iot:s3-presigned-url:https://<bucket>.s3.eu-west-1.amazonaws.com/<key>}"}`
+  is downloaded with `esp_https_ota` (the new image must carry that version; secure boot checks
+  its signature), then the device restarts into it. Up to 3 tries per job (a failed download or a
+  rollback counts), then FAILED. Purple LED while updating.
+- **AWS (user):** a private S3 bucket for images, a role that lets IoT pre-sign links to it, static
+  thing groups (`sensors-bench` first, then `sensors-pilot`, `sensors-fleet`), jobs targeting a
+  group with rollout / abort / time-out settings. Steps: `cloud/README.md`, "Firmware updates".
+- **Done when:** 0840E8 updates itself from a job, reports SUCCEEDED, and `reported.fw` shows the
+  new version; then the same with all three boards in `sensors-pilot`.
+- **Notes:** the first update from the factory slot overwrites the original SPro app in `ota_0`
+  (factory stays as the fallback). The board's IDF 5.2.1 bootloader is assumed to have rollback on
+  (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` in the helloworld project it came from). A device
+  that is restarted (power button) before its first round after an update rolls back; the job then
+  retries. Later: dynamic groups by `reported.fw` (needs fleet indexing), AWS code signing, a
+  screen in the web app, the gateway on the same mechanism.
+- **Status (parked 2026-11-17):** code written and built (signed with spro), not yet flashed or
+  tested; the AWS side (bucket, presign role, `sensors-bench`, job) not yet set up.
+- **To decide / do before the first test:**
+  1. Accept that the first update overwrites the original SPro app in `ota_0`, or keep a copy of
+     its image first (secure download mode will not let us read it back from the board).
+  2. Cable flashing after an update: once otadata points at `ota_0`/`ota_1`, the bootloader ignores
+     `factory`, so an app flashed to 0x20000 does not run. Fix: write 0x2000 bytes of 0xFF over
+     `otadata` (0x320000) with esptool (plain write, allowed in secure download mode; NVS untouched),
+     then factory boots again. Add this as a README step.
+  3. Add a boot log line printing the running image's OTA state: `pending verify` after the first
+     update proves the 5.2.1 bootloader has rollback; `new` / `undefined` means it does not (updates
+     still work, but a broken image would not roll back by itself). IDF 6.1 for the app does not
+     change this: the bootloader decides, and the otadata format is the same in 5.2.1 and 6.1.
+- **Test plan:** commit, flash that build by cable (version `0.1.0-g<hash>`); tag the same commit
+  `sensor-v0.2.0` and build (version `0.2.0`); upload to the bucket; create a job for
+  `sensors-bench` (0840E8 only); watch the next charging round update, restart, confirm, and the
+  job go SUCCEEDED.
+
 ### Later, on the same connection
 - `gnss.log` wired up once GNSS logging exists (accepted and stored from phase 2 on).
 - Live log during a session (Wi-Fi on while running, as a debug setting: costs battery).
-- Firmware updates (OTA), while charging. Two ways on this connection:
-  - **Through the shadow** (simplest, fine for a handful of boards): `desired.fw` =
-    `{version, url, sha256}`; the device downloads with `esp_https_ota`, restarts, and reports the
-    running version. Weak point: a pre-signed S3 URL can expire before an offline device next
-    charges.
-  - **Through AWS IoT Jobs** (built for this): staged rollouts, per-device status, retries, and a
-    fresh pre-signed URL per device at download time. Move to it when the fleet grows.
-  - Either way on these boards: the image must be signed with the **spro** key (secure boot checks
-    it); writes are encrypted automatically; rollback is already on (`confirm_ota_image`). The
-    first OTA from the factory slot goes to **ota_0, which overwrites the original SPro app** (the
-    recovery path in README "Build and flash"); the factory slot stays as the fallback. Purple LED
-    is reserved for it.
+- Firmware updates: now phase 6 above.
 - A settings screen in the web app (the backend calls `UpdateThingShadow`).
 - The gateway's own settings (its README phase 2) with the same shadow layout.
 
