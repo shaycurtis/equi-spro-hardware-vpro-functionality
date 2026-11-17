@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
-#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_mac.h"
@@ -75,62 +74,6 @@ void telemetry_encode(const telemetry_t *t, uint8_t out[TELEMETRY_PAYLOAD_LEN])
     out[19] = t->heart_rate;
     out[20] = (uint8_t)((t->position & 0x07) | ((t->positions_seen >> 1) << 3));
     put16(&out[21], (uint16_t)t->horse_temp_c100);
-    uint8_t crashes = t->crash_count > TELEMETRY_CRASH_MAX ? TELEMETRY_CRASH_MAX : (uint8_t)t->crash_count;
-    out[23] = (uint8_t)((t->reset_reason & 0x0f) | (crashes << 4));
-}
-
-/* Flags AD (3) + length, type, company ID (4) + payload, in a 31-byte legacy PDU. */
-_Static_assert(3 + 4 + TELEMETRY_PAYLOAD_LEN <= 31, "telemetry advert exceeds a legacy PDU");
-
-/* ------------------------------------------------------------------ boot health */
-
-static uint8_t s_reset_reason;
-static uint16_t s_crash_count;
-static bool s_health_ready;
-
-/* Abnormal resets. A software restart (power_restart, esp_restart) and power-on are not crashes. */
-static bool crash_reset(esp_reset_reason_t r)
-{
-    return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT || r == ESP_RST_WDT ||
-           r == ESP_RST_BROWNOUT || r == ESP_RST_PWR_GLITCH || r == ESP_RST_CPU_LOCKUP;
-}
-
-void telemetry_boot_health(void)
-{
-    if (s_health_ready) {
-        return;
-    }
-    s_health_ready = true;
-    esp_reset_reason_t reason = esp_reset_reason();
-    s_reset_reason = (uint8_t)reason;
-    nvs_handle_t h;
-    uint16_t count = 0;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_get_u16(h, "crashes", &count);   /* missing key: count stays 0 */
-        if (crash_reset(reason) && count < UINT16_MAX) {
-            uint16_t next = (uint16_t)(count + 1);
-            if (nvs_set_u16(h, "crashes", next) == ESP_OK && nvs_commit(h) == ESP_OK) {
-                count = next;
-            } else {
-                ESP_LOGW(TAG, "crash count not saved");
-            }
-        }
-        nvs_close(h);
-    } else if (crash_reset(reason)) {
-        ESP_LOGW(TAG, "crash not counted: NVS unavailable");
-    }
-    s_crash_count = count;
-    ESP_LOGI(TAG, "reset reason %u, crash count %u", s_reset_reason, s_crash_count);
-}
-
-uint8_t telemetry_reset_reason(void)
-{
-    return s_reset_reason;
-}
-
-uint16_t telemetry_crash_count(void)
-{
-    return s_crash_count;
 }
 
 /* ------------------------------------------------------------ fleet key */

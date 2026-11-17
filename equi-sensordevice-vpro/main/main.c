@@ -328,7 +328,6 @@ static void cloud_show(cloud_show_t st)
 static void on_charge_only(void)
 {
     device_id_get();           /* opens NVS (saved networks) */
-    telemetry_boot_health();   /* charge-only boot (for example after a brownout) still counts */
     if (sensors_init() != ESP_OK) {
         ESP_LOGW(TAG, "sensors unavailable for the charging telemetry");
     }
@@ -563,8 +562,6 @@ static void build_telemetry(const sensor_sample_t *s, uint8_t seq, telemetry_t *
         .temp_c100 = s->th_ok ? (int16_t)lroundf(s->temp_c * 100.0f) : 0x7FFF,
         .humidity_half = s->th_ok ? (uint8_t)lroundf(s->rh * 2.0f) : 0xFF,
         .horse_temp_c100 = s_probe_ok ? (int16_t)lroundf(s_probe_c * 100.0f) : 0x7FFF,
-        .reset_reason = telemetry_reset_reason(),
-        .crash_count = telemetry_crash_count(),
         .steps = steps,
         .position = s->imu_ok ? s->position : 0,
         .positions_seen = s->imu_ok ? s->positions_seen : 0,
@@ -659,7 +656,6 @@ void app_main(void)
     power_start();
 
     s_dev_id = strtoul(device_id_get(), NULL, 16) & 0xFFFFFF;
-    telemetry_boot_health();   /* crash count and reset reason; no-op if charge-only already did it */
     gnss_standby_async();
 
     char name[24];
