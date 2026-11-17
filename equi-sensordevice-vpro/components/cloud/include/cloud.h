@@ -19,8 +19,12 @@
  *
  * Retries: each saved network is tried twice per round. A failed round (no Wi-Fi, no time, or the
  * backend not answering) is retried after 30 s, 1, 2, then every 5 min; recordings still on the
- * card after a round are retried after 1 min. A clean round waits CLOUD_PERIOD_S. The task ends
- * once the battery is full, that was reported and the card holds no recordings.
+ * card after a round are retried after 1 min. A clean round waits CLOUD_PERIOD_S. Once the
+ * battery is full, that was reported and the card holds no recordings, the charging reports stop
+ * but the rounds go on for the settings.
+ *
+ * Last in each round: AWS IoT (components/iot), the device's own connection for its settings
+ * (Device Shadow "config" <-> config.json on the card; see storage.h and iot.h).
  *
  * The URL and key come from <repo>/private/api_env.h (git-ignored, like VPro's env.xh):
  *   #define API_DATA_URL "https://..."

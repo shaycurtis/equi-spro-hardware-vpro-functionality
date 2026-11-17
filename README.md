@@ -1,7 +1,7 @@
 # Equimetrics VPro firmware (SPRO PCBA)
 
 Custom firmware for the Equimetrics SPRO sensor board (ESP32-S3-WROOM-1-N16R8), a horse-worn
-chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-16** (after the firmware review and its fixes).
+chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-17** (firmware review fixes; remote settings through AWS IoT, phases 1 and 2).
 
 > **Signing keys never leave this PC.** `**/private/` and `*.pem` are git-ignored. All
 > building and signing is local. The **fleet key** (`private/fleet_key.bin`, 16 bytes) is built into the
@@ -59,7 +59,8 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | SD card IMU logging | ✅ `imu_…edf`: accel ±16 g + gyro ±2000 dps at 104/416 Hz, LIS2MDL mag at 104 Hz (sensor hub), FIFO + INT1, 0 overruns |
 | Live BLE data to the backend | ✅ PC gateway `--mqtt` -> AWS IoT Core (`equimetrics/ble/<thing>/adv`) -> **postBleData** Lambda -> dev API -> Mongo -> app charts, one measurement a minute (`cloud/README.md`). `horseTemperature` and `respiration` (heart rate / 3) are **temporary placeholders** in the Lambda; `position` / `positionsSeen` come from the device (advert v6; `"standing"` / `[]` for older firmware); `heartRate` is 0 when no beats were counted |
 | Charging telemetry | ✅ On USB in charge-only mode: Wi-Fi + SNTP every 10 min, POST to the dev data API (in Mongo) |
-| Wi-Fi file upload | ✅ In charge-only mode after the charging report, as VPro: ECG `prepare` -> PUT to the pre-signed URL -> `process` (IMU: `api/imu` -> PUT), file deleted after success, 3 tries per connection. Verified: a 39 s app recording, 20 KB in 0.25 s, all three steps 200 |
+| Wi-Fi file upload | ✅ In charge-only mode after the charging report, as VPro: ECG `prepare` -> PUT to the pre-signed URL -> `process` (IMU: `api/imu` -> PUT), file deleted after success, 3 tries per connection. Verified: a 39 s app recording, 20 KB in 0.25 s, all three steps 200; **IMU** verified 2026-11-17 on 0840E8 (6 min at 104 Hz + mag, 726 KB in 5.3 s, `api/imu` 201 -> PUT 200, file deleted) |
+| Remote settings (AWS IoT) | ✅ Phases 1 and 2 of `REMOTE_SETTINGS_PLAN.md`, verified 2026-11-17 on 0840E8. In charge-only mode, last in each 10 min round: the sensor connects to AWS IoT Core under **its own certificate** (fleet provisioning by claim the first time; thing `equi-sensor-<backend id>`), reads its Device Shadow `config`, writes valid `desired` settings to `config.json` and publishes `reported` (settings + `fw`, `hw`, `sd_card`, `reported_at`). A change made in the AWS console took effect in the next session (IMU logging on -> IMU file recorded and uploaded). AWS set-up: `cloud/README.md`, "Sensor identity". Still to do: health fields, live log, black-box log, OTA |
 | ESP32-S3 gateway (phase 1) | 🟡 `equi-gateway-esp32/`: SoftAP Wi-Fi provisioning, NimBLE active scan, esp-mqtt to IoT Core in the PC gateway's format (postBleData unchanged), fleet provisioning by claim, offline buffer, LED + status log. Verified 2026-11-11 on the old receiver kit (COM4, now thing `equi-gw-F412FAE86D10`): fleet provisioning, then readings through IoT Core -> postBleData with the PC gateway stopped (15B0B4 published and decoded by the Lambda's code; full loop seen by the user; 236B2C heard too). Both devices count it as their trusted gateway (same chip as the receiver, see its README). Shadow settings and OTA are planned (its README) |
 | Range test (50 m barn target) | ⏳ Not done yet (bench: ~18/20 adverts at -37 dBm) |
 
@@ -81,6 +82,9 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
      (twice each, 30 s per try), then any saved network not seen (maybe a hidden SSID, once each). A
      failed round again after 30 s, 1 min, 2 min, then every 5 min; recordings still on the card after
      1 min; otherwise every 10 min.
+   - Once the battery is full and that was reported, the charging reports stop, but the 10 min
+     rounds go on: each one checks the device's settings in AWS IoT (below), so a device left on
+     its charger picks up a change within 10 min.
 7. **Add a Wi-Fi network:** hold **both buttons** for 3 s, from off (power-on with both held) or while running: 3 white flashes, then steady white. From a running session the recordings are closed and the SD card unmounted before the restart.
 8. **Crash or watchdog reset while running:** the device stays on and **carries on with the same session** (no tag scan, no buzz; same session ID, horse and advert sequence; first advert ~2 s after the reset). The session is kept in RTC memory, so it is lost with the power, as it should be. With SD logging on, the recording continues in new files in the same session folder, named after the restart time. Five advert bursts failing in a row (~5 min) also restart the device this way. Verified 2026-11-16 on 0840E8 with a forced `abort()` (see Gotchas).
 
@@ -92,6 +96,16 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
   (ECG 256/512 Hz; IMU 104/416 Hz for accel + gyro, magnetometer always 104 Hz). `ecg.log` is the
   **automatic (continuous) ECG** recording; off in normal use, where the app starts recordings.
   The defaults only apply when the file is missing: an existing card keeps its values.
+  The file also holds `"gnss":{"log":false}` and `"debug":{"live_log":false}` (stored, no effect
+  yet).
+- **Changing settings remotely:** the same fields are the device's AWS IoT Device Shadow
+  `config` (thing `equi-sensor-<backend id>`). Edit `desired` in the AWS console (IoT Core ->
+  Things -> the thing -> Device Shadows -> `config`); the device applies it at its next charging
+  round, writes it to `config.json` (through a temporary file) and shows what it uses in
+  `reported`. It takes effect at the next power-on. Invalid values are ignored and stay visible
+  as a difference between `desired` and `reported`; without an SD card nothing is applied
+  (`"sd_card": false`). A new device creates the shadow itself, with its current settings as
+  `desired`.
 - Each session writes `/sessions/<session>/<type>_<device id>_<chip number>_<session>.edf`, e.g.
   `/sessions/1794211982000/ecg_50787DFFFE15B0B4_999012345678436_1794211982000.edf` (session ID = Unix time in
   ms, chip `Unknown` without a tag: the VPro platform's naming, whose uploader reads the session from
@@ -273,8 +287,10 @@ python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default-reset --afte
   (`using SPro device ID from NVS: …`), have it registered in the dev DB, and provision Wi-Fi.
   Fit a **blank SD card** (the firmware does not wipe old SPro files; it only writes `config.json` if
   it is missing). Boards done so far: `15B0B4`, `236B2C`, `0840E8` (backend ID
-  `DCB4D9FFFE0840E8`, **not registered on dev yet**; Wi-Fi provisioned 2026-11-16; the only board
-  on the 2026-11-16 build with the review fixes, the other two still need flashing).
+  `DCB4D9FFFE0840E8`, known to the dev backend: its IMU upload on 2026-11-17 was accepted with an
+  organisation; Wi-Fi provisioned 2026-11-16; AWS IoT thing `equi-sensor-DCB4D9FFFE0840E8`; the
+  only board on the current build with the review fixes and remote settings, the other two
+  still need flashing).
 - Check the port first: `esptool -p COM3 --no-stub get-security-info` must say *Secure Boot: Enabled*.
 - Back to the original SPro app (in ota_0): write `equi-sensordevice-blink/recovery/otadata_boot_ota0.bin`
   encrypted to 0x320000 (same esptool options).
@@ -316,6 +332,14 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 - **Testing the resume:** set `CRASH_TEST_HOLD_MS` in `main.c` (e.g. 8000): holding the scan button
   alone that long calls `abort()`. A reset from the serial lines (EN) counts as a power-on, so it
   does not test it. Set it back to 0 before the build leaves the bench.
+- **Build needs the sensor claim certificate** (`private/sensor-claim/claim.pem.crt` +
+  `claim.private.pem.key`, git-ignored) for a device to get its AWS identity; without it the
+  firmware builds with a CMake warning and AWS IoT stays off. Run `idf.py reconfigure` after
+  adding or changing those files. The device's own certificate and key live in NVS namespace
+  `iot` (46 entries on 0840E8; provisioning is refused below ~100 free entries). NVS is 16 KB
+  and never erased.
+- **The charging task no longer ends at "battery full"** (it used to, which would have stopped
+  the settings checks): it stops the charging reports and keeps the rounds.
 - **BLE host reset:** NimBLE keeps its "advertising set configured" state across a host reset while
   the controller forgets the sets, so `on_reset` clears our own flags and both adverts are
   configured again (from reading the IDF 6.1 source; not reproduced on hardware).
@@ -455,7 +479,7 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 9. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.
 10. **Firmware review (2026-11-16), still to do:** flash 15B0B4 and 236B2C with the fixed build;
    with SD logging on, check that the provisioning gesture closes the files and that a resumed
-   session writes new files; register `DCB4D9FFFE0840E8` on dev. Review findings not fixed yet: a
+   session writes new files. Review findings not fixed yet: a
    new-horse file switch stalls if one signal has stopped; an app recording with no duration never
    ends if the app goes away; header-only files (no records) are uploaded; the session tag has
    only 32 values (ms IDs are multiples of 1000); no crash counter / reset reason in the telemetry;

@@ -21,6 +21,7 @@ static const char *TAG = "storage";
 #define SD_HOST        SPI3_HOST          /* SPI2 belongs to the MAX30001 */
 #define SD_FREQ_KHZ    20000              /* SDSPI maximum */
 #define CONFIG_PATH    STORAGE_MOUNT "/config.json"
+#define CONFIG_TMP     STORAGE_MOUNT "/config.tmp"
 #define CONFIG_VERSION 1
 
 static sdmmc_card_t *s_card;
@@ -52,28 +53,75 @@ static bool pick_bool(const cJSON *obj, const char *key, bool dflt)
     return cJSON_IsBool(v) ? cJSON_IsTrue(v) : dflt;
 }
 
-static void write_default_config(void)
+void storage_config_to_json(cJSON *obj)
+{
+    cJSON *ecg = cJSON_AddObjectToObject(obj, "ecg");
+    cJSON_AddBoolToObject(ecg, "log", s_cfg.ecg_log);
+    cJSON_AddNumberToObject(ecg, "rate_hz", s_cfg.ecg_rate_hz);
+    cJSON *imu = cJSON_AddObjectToObject(obj, "imu");
+    cJSON_AddBoolToObject(imu, "log", s_cfg.imu_log);
+    cJSON_AddNumberToObject(imu, "rate_hz", s_cfg.imu_rate_hz);
+    cJSON *gnss = cJSON_AddObjectToObject(obj, "gnss");
+    cJSON_AddBoolToObject(gnss, "log", s_cfg.gnss_log);
+    cJSON *dbg = cJSON_AddObjectToObject(obj, "debug");
+    cJSON_AddBoolToObject(dbg, "live_log", s_cfg.live_log);
+}
+
+/* Write config.json from s_cfg: to a temporary file first, so a power cut cannot leave a
+ * half-written configuration. */
+static bool write_config(void)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "version", CONFIG_VERSION);
-    cJSON *ecg = cJSON_AddObjectToObject(root, "ecg");
-    cJSON_AddBoolToObject(ecg, "log", s_cfg.ecg_log);
-    cJSON_AddNumberToObject(ecg, "rate_hz", s_cfg.ecg_rate_hz);
-    cJSON *imu = cJSON_AddObjectToObject(root, "imu");
-    cJSON_AddBoolToObject(imu, "log", s_cfg.imu_log);
-    cJSON_AddNumberToObject(imu, "rate_hz", s_cfg.imu_rate_hz);
+    storage_config_to_json(root);
     char *text = cJSON_Print(root);
     cJSON_Delete(root);
-    FILE *f = text ? fopen(CONFIG_PATH, "w") : NULL;
+    FILE *f = text ? fopen(CONFIG_TMP, "w") : NULL;
+    bool ok = false;
     if (f) {
-        fputs(text, f);
-        fputc('\n', f);
-        fclose(f);
-        ESP_LOGI(TAG, "wrote default %s", CONFIG_PATH);
-    } else {
-        ESP_LOGW(TAG, "could not write %s", CONFIG_PATH);
+        ok = fputs(text, f) >= 0 && fputc('\n', f) != EOF;
+        ok = fclose(f) == 0 && ok;
     }
     free(text);
+    if (ok) {
+        unlink(CONFIG_PATH);                       /* FAT rename does not replace a file */
+        ok = rename(CONFIG_TMP, CONFIG_PATH) == 0;
+    }
+    if (!ok) {
+        ESP_LOGW(TAG, "could not write %s", CONFIG_PATH);
+    }
+    return ok;
+}
+
+static void write_default_config(void)
+{
+    if (write_config()) {
+        ESP_LOGI(TAG, "wrote default %s", CONFIG_PATH);
+    }
+}
+
+static void apply_json(const cJSON *root);
+
+bool storage_config_update(const cJSON *obj)
+{
+    if (!s_card || !cJSON_IsObject(obj)) {
+        return false;
+    }
+    storage_config_t before = s_cfg;
+    apply_json(obj);
+    if (before.ecg_log == s_cfg.ecg_log && before.ecg_rate_hz == s_cfg.ecg_rate_hz &&
+        before.imu_log == s_cfg.imu_log && before.imu_rate_hz == s_cfg.imu_rate_hz &&
+        before.gnss_log == s_cfg.gnss_log && before.live_log == s_cfg.live_log) {
+        return false;
+    }
+    if (!write_config()) {
+        s_cfg = before;                            /* not kept: do not report it as applied */
+        return false;
+    }
+    ESP_LOGI(TAG, "config changed: ECG %s @ %u Hz, IMU %s @ %u Hz, GNSS %s, live log %s (from the next power-on)",
+             s_cfg.ecg_log ? "on" : "off", s_cfg.ecg_rate_hz, s_cfg.imu_log ? "on" : "off", s_cfg.imu_rate_hz,
+             s_cfg.gnss_log ? "on" : "off", s_cfg.live_log ? "on" : "off");
+    return true;
 }
 
 static void load_config(void)
@@ -92,6 +140,13 @@ static void load_config(void)
         ESP_LOGW(TAG, "config: %s is not valid JSON; using defaults", CONFIG_PATH);
         return;
     }
+    apply_json(root);
+    cJSON_Delete(root);
+}
+
+/* Take the known, valid settings from a JSON object (config.json, or the shadow's desired). */
+static void apply_json(const cJSON *root)
+{
     const cJSON *ecg = cJSON_GetObjectItemCaseSensitive(root, "ecg");
     if (cJSON_IsObject(ecg)) {
         s_cfg.ecg_log = pick_bool(ecg, "log", s_cfg.ecg_log);
@@ -102,7 +157,14 @@ static void load_config(void)
         s_cfg.imu_log = pick_bool(imu, "log", s_cfg.imu_log);
         s_cfg.imu_rate_hz = pick_rate(imu, 104, 416, s_cfg.imu_rate_hz);
     }
-    cJSON_Delete(root);
+    const cJSON *gnss = cJSON_GetObjectItemCaseSensitive(root, "gnss");
+    if (cJSON_IsObject(gnss)) {
+        s_cfg.gnss_log = pick_bool(gnss, "log", s_cfg.gnss_log);
+    }
+    const cJSON *dbg = cJSON_GetObjectItemCaseSensitive(root, "debug");
+    if (cJSON_IsObject(dbg)) {
+        s_cfg.live_log = pick_bool(dbg, "live_log", s_cfg.live_log);
+    }
 }
 
 /* ----------------------------------------------------------------- mount */

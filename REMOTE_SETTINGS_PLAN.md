@@ -1,6 +1,8 @@
 # Plan: remote settings and logs for the SPRO sensor (AWS IoT)
 
-Written 2026-11-16. Status: **agreed in outline, nothing built yet.** Start at "Phase 1".
+Written 2026-11-16. Status (2026-11-17): **phases 1 and 2 done and verified on 0840E8.** Next:
+phase 3. The other boards (15B0B4, 236B2C) get their identity the first time they charge on Wi-Fi
+with the current firmware.
 
 ## Goal
 
@@ -58,7 +60,12 @@ through a new `storage_config_save()` in `components/storage/storage.c`.
 
 ## Phases
 
-### Phase 1: identity
+### Phase 1: identity -- DONE 2026-11-17
+Result on 0840E8: NVS had 309 of 504 entries free; provisioning took ~4 s (certificate issued,
+thing `equi-sensor-DCB4D9FFFE0840E8`), the identity uses 46 NVS entries. AWS pieces as named
+below, steps in `cloud/README.md` "Sensor identity". The sensor policy already covers the
+shadow, IoT Jobs and the log topic.
+
 1. **Measure free NVS space** on a board (`nvs_get_stats`) before anything is written. The
    partition is only 16 KB (SPro data, BLE bonds, Wi-Fi networks); the certificate + key need about
    1.5 KB. **Never erase NVS.** If it does not fit, stop and rethink (e.g. fewer BLE bonds).
@@ -70,7 +77,15 @@ through a new `storage_config_save()` in `components/storage/storage.c`.
 3. Firmware: `iot` component, provision on first connection, connect as the thing.
 - **Done when:** the thing appears in IoT Core and the log shows an MQTT connection as that thing.
 
-### Phase 2: settings
+### Phase 2: settings -- DONE 2026-11-17
+Result on 0840E8: the device created its shadow; `desired.imu.log = true` set in the console was
+applied at the next round (`config.json` rewritten, `reported` matched), and the next session
+recorded and uploaded an IMU file. Found and fixed on the way: the charging task used to end at
+"battery full", which stopped the rounds; it now keeps them for the settings. `reported` already
+carries `fw`, `hw`, `sd_card`, `reported_at`. Not exercised: an invalid value, no SD card.
+Code: `components/iot` (`iot_sync`, `shadow_sync`), `storage_config_update` /
+`storage_config_to_json`, callbacks in `components/cloud/cloud.c`.
+
 - Shadow get / delta -> `config.json` -> reported.
 - **Done when:** IMU logging is switched on in the AWS console's shadow editor, the device applies
   it at its next charging round, `reported` matches, and the next session writes an IMU file.
@@ -114,14 +129,15 @@ through a new `storage_config_save()` in `components/storage/storage.c`.
 
 ## Risks and open points
 
-- **NVS space** (phase 1, step 1): the first thing to check.
+- **NVS space:** fine on 0840E8 (263 entries free after provisioning). The figure is logged every
+  round (`iot: NVS: ...`), so check it on 15B0B4 and 236B2C when they first run this firmware.
 - **Device key in plain NVS:** NVS is not encrypted on these boards (`CONFIG_NVS_ENCRYPTION` off).
   Same exposure as today's Wi-Fi passwords; reading it needs the flash chip. Encrypting NVS means
   burning an eFuse key (permanent): a production decision, not part of this plan.
 - **Flashing rules still apply:** app only, encrypted, at 0x20000; user's OK before every flash
   (README "Build and flash").
 - **0840E8** is the bench board for this work (Wi-Fi provisioned, on the 2026-11-16 build); its
-  backend ID `DCB4D9FFFE0840E8` is not registered on dev, which this plan does not need.
+  the dev backend knows its ID `DCB4D9FFFE0840E8` (IMU upload accepted 2026-11-17).
 - **Memory:** MQTT with a client certificate runs after the HTTPS calls, not at the same time, and
   BLE is off in charge-only, so heap should not be a problem; check the high-water mark anyway.
 

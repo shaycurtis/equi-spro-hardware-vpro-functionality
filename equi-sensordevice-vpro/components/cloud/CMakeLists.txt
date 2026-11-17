@@ -9,4 +9,4 @@ idf_component_register(SRCS "cloud.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "${API_ENV_DIR}"
                        PRIV_REQUIRES provisioning esp_wifi esp_netif esp_event esp_http_client esp-tls
-                                     mbedtls esp_timer storage)
+                                     mbedtls esp_timer storage iot)

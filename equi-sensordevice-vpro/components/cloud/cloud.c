@@ -24,6 +24,7 @@
 #include "esp_netif_sntp.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "iot.h"
 #include "provisioning.h"
 #include "storage.h"
 #include "api_env.h"   /* <repo>/private: API_DATA_URL, API_DATA_KEY (not in git) */
@@ -601,6 +602,32 @@ static int walk_files(bool send)
 static int upload_files(void) { return walk_files(true); }
 static int pending_files(void) { return walk_files(false); }
 
+/* ------------------------------------------------- settings (Device Shadow) */
+
+/* The shadow's settings are config.json's (storage.h); a change is written to the card and used
+ * from the next power-on. Without a card nothing is applied, and "sd_card": false says why. */
+static void shadow_apply(const cJSON *desired)
+{
+    storage_config_update(desired);
+}
+
+static void shadow_settings(cJSON *settings)
+{
+    storage_config_to_json(settings);
+}
+
+static void shadow_status(cJSON *reported)
+{
+    cJSON_AddStringToObject(reported, "fw", s_cfg.fw_version);
+    cJSON_AddStringToObject(reported, "hw", s_cfg.hw_version);
+    cJSON_AddBoolToObject(reported, "sd_card", storage_mounted());
+    cJSON_AddNumberToObject(reported, "reported_at", (double)(now_ms() / 1000));
+}
+
+static const iot_shadow_t k_shadow = {
+    .apply = shadow_apply, .settings = shadow_settings, .status = shadow_status,
+};
+
 /* ------------------------------------------------------------------- task */
 
 static void show(cloud_show_t state)
@@ -620,7 +647,7 @@ static uint32_t backoff_s(int fails)
 
 static void cloud_task(void *arg)
 {
-    bool sent_full = false;
+    bool sent_full = false, was_idle = false;
     int fails = 0;
     if (strstr(API_DATA_KEY, "PASTE_") || !API_DATA_URL[0]) {
         ESP_LOGE(TAG, "private/api_env.h has no data key: cloud calls disabled");
@@ -642,10 +669,17 @@ static void cloud_task(void *arg)
             s_cfg.read_status(&st);
         }
         int pending = pending_files();
-        if (!st.charging && sent_full && pending == 0) {
-            ESP_LOGI(TAG, "battery full and reported, no recordings left: cloud task done");
-            break;
+        if (st.charging) {
+            sent_full = false;               /* charging again: the next "full" is reported too */
         }
+        /* Battery full and reported, nothing to upload: no more charging reports, but the rounds
+         * go on for the settings (Device Shadow), so a device left on its charger still picks
+         * up a change within CLOUD_PERIOD_S. */
+        bool idle = !st.charging && sent_full && pending == 0;
+        if (idle && !was_idle) {
+            ESP_LOGI(TAG, "battery full and reported, no recordings left: settings checks only from now on");
+        }
+        was_idle = idle;
         if (pending) {
             ESP_LOGI(TAG, "%d recording(s) waiting to upload", pending);
         }
@@ -659,7 +693,7 @@ static void cloud_task(void *arg)
             if (time(NULL) < 1704067200) {   /* before 2024: certificates can't be checked */
                 ESP_LOGW(TAG, "no valid time: skipping HTTPS");
             } else {
-                int status = send_charging(&st);
+                int status = idle ? 200 : send_charging(&st);
                 if (status / 100 == 2 && !st.charging) {
                     sent_full = true;
                 }
@@ -668,6 +702,9 @@ static void cloud_task(void *arg)
                     left = upload_files();
                 }
                 ok = status / 100 == 2;
+                /* AWS IoT (own certificate; settings through the Device Shadow): its own result,
+                 * the round and the LED follow the backend calls above. */
+                iot_sync(s_cfg.device_id, &k_shadow);
             }
             wifi_off();
         }
