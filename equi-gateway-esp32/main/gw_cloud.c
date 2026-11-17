@@ -10,7 +10,8 @@
  *        -> accepted {thingName, deviceConfiguration}
  *    The thing name, certificate and key go to NVS (gw_identity).
  * 2. Then: connect as the thing (client ID = thing name, as the shared policy requires) and publish
- *    exactly what gateway/mqtt_publisher.py publishes, for the unchanged postBleData Lambda:
+ *    exactly what gateway/mqtt_publisher.py publishes. postBleData deduplicates a burst heard by
+ *    several gateways, and still accepts an advert and its scan response as two messages:
  *      topic   equimetrics/ble/<thing>/adv            (QoS 1)
  *      payload {"gatewayId": <thing>, "items": [{"mac","rssi","ts","adv"}..., {"mac","rssi","ts","rsp"}]}
  *    one message per device per burst; "ts" = receive time in Unix ms.

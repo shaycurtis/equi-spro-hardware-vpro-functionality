@@ -1,7 +1,7 @@
 """
 Build the postBleData deployment zips into cloud/post_ble_data/dist/ (git-ignored build output):
 
-  post_ble_data.zip      the function: post_ble_data.py + gateway/equi_protocol.py (one decoder)
+  post_ble_data.zip      the function: post_ble_data.py + ble_dedup.py + gateway/equi_protocol.py
   cryptography_layer.zip a Lambda layer with `cryptography` (AES-CCM), Linux wheels for the runtime
 
     python cloud/post_ble_data/build.py [--python 3.12] [--arch x86_64|arm64]
@@ -26,6 +26,7 @@ def build_function():
     out = DIST / "post_ble_data.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(HERE / "post_ble_data.py", "post_ble_data.py")
+        z.write(HERE / "ble_dedup.py", "ble_dedup.py")
         z.write(REPO / "gateway" / "equi_protocol.py", "equi_protocol.py")
     print(f"function: {out}  (handler: post_ble_data.lambda_handler)")
 

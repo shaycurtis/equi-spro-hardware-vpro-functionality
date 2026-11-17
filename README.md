@@ -52,12 +52,12 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
 | Power optimisation (2e) | 🟡 Light sleep works, but the overnight run measured **~12-14 mA** (≈4.5-5 days on 1500 mAh) against a 3-6 mA estimate; with ECG 512 Hz + IMU 416 Hz logging **~28 mA** (≈2.2 days). Parked until the PPK2 is found (see below) |
 | Heart rate | ✅ MAX30001 hardware R-to-R detector, median over 60 s, in advert v4 (verified 76-77 bpm on battery) |
 | Respiration | ⏳ Planned (1 spare advert byte reserved) |
-| Horse temperature probe | ✅ External **DS18B20** on the connector's 1-Wire pin (see "Temperature probe" below), Espressif's `ds18b20` + `onewire_bus` components, read every 60 s, in advert v6 (2 optional bytes). Verified 2026-11-10 on 15B0B4 (20.88 °C in air, through the gateway and MQTT). Costs ~15 µA. postBleData sends it as `horseTemperature` (**Lambda change written, not uploaded yet**) |
+| Horse temperature probe | ✅ External **DS18B20** on the connector's 1-Wire pin (see "Temperature probe" below), Espressif's `ds18b20` + `onewire_bus` components, read every 60 s, in advert v6 (2 optional bytes). Verified 2026-11-10 on 15B0B4 (20.88 °C in air, through the gateway and MQTT). Costs ~15 µA. postBleData sends it as `horseTemperature` when the advert carries it, and the board temperature otherwise. **That Lambda zip and the DynamoDB dedup are written and not uploaded — console steps in `cloud/README.md`, "Still to deploy"** |
 | Horse position | ✅ From the accelerometer's gravity direction (left / right roll thresholds, no gyro, no extra sensor current), in advert v6 -> `position` / `positionsSeen` (see "Horse position" below). Bench-verified 2026-11-10 on 236B2C, held by hand: standing, lateral, sternal, rolling and moving all reported through the gateway. **Angles not yet tuned on a horse**; not yet tried with SD logging on |
 | SD card ECG logging (phase 3) | ✅ `/sessions/<session>/ecg_<device>_<chip>_<session>.edf`, 256 (default) / 512 Hz per `config.json`, mV (as VPro), interrupt-driven (light sleep kept), 0 overflows |
 | Live ECG + app recordings | ✅ VPro-compatible BLE services (Raw ECG 256 sps, Heart Rate, ECG control); works with the **Equimetrics (VPro) app**; app recordings saved as their own EDF files. App needs a backend-registered **16-digit** ID (see "Device IDs" below); verified with `EQUI_CCBA97FFFE236B2C` |
 | SD card IMU logging | ✅ `imu_…edf`: accel ±16 g + gyro ±2000 dps at 104/416 Hz, LIS2MDL mag at 104 Hz (sensor hub), FIFO + INT1, 0 overruns |
-| Live BLE data to the backend | ✅ PC gateway `--mqtt` -> AWS IoT Core (`equimetrics/ble/<thing>/adv`) -> **postBleData** Lambda -> dev API -> Mongo -> app charts, one measurement a minute (`cloud/README.md`). `horseTemperature` and `respiration` (heart rate / 3) are **temporary placeholders** in the Lambda; `position` / `positionsSeen` come from the device (advert v6; `"standing"` / `[]` for older firmware); `heartRate` is 0 when no beats were counted |
+| Live BLE data to the backend | ✅ PC gateway `--mqtt` -> AWS IoT Core (`equimetrics/ble/<thing>/adv`) -> **postBleData** Lambda -> dev API -> Mongo -> app charts, one measurement a minute (`cloud/README.md`). `horseTemperature` is the probe when the advert carries it, otherwise the board temperature; `respiration` (heart rate / 3) is still a placeholder. Dedup across gateways is in the Lambda and goes live with the same upload. `position` / `positionsSeen` come from the device (advert v6; `"standing"` / `[]` for older firmware); `heartRate` is 0 when no beats were counted |
 | Charging telemetry | ✅ On USB in charge-only mode: Wi-Fi + SNTP every 10 min, POST to the dev data API (in Mongo) |
 | Wi-Fi file upload | ✅ In charge-only mode after the charging report, as VPro: ECG `prepare` -> PUT to the pre-signed URL -> `process` (IMU: `api/imu` -> PUT), file deleted after success, 3 tries per connection. Verified: a 39 s app recording, 20 KB in 0.25 s, all three steps 200 |
 | ESP32-S3 gateway (phase 1) | 🟡 `equi-gateway-esp32/`: SoftAP Wi-Fi provisioning, NimBLE active scan, esp-mqtt to IoT Core in the PC gateway's format (postBleData unchanged), fleet provisioning by claim, offline buffer, LED + status log. Verified 2026-11-11 on the old receiver kit (COM4, now thing `equi-gw-F412FAE86D10`): fleet provisioning, then readings through IoT Core -> postBleData with the PC gateway stopped (15B0B4 published and decoded by the Lambda's code; full loop seen by the user; 236B2C heard too). Both devices count it as their trusted gateway (same chip as the receiver, see its README). Shadow settings and OTA are planned (its README) |
@@ -185,7 +185,8 @@ connector gives the horse temperature instead (`components/probe`, details in `p
 - **Core 0:** RMT channels share one interrupt, which the status LEDs' channel holds on core 0, so
   the sample task is pinned to core 0 (from core 1: `install rx interrupt failed`).
 - **Advert:** int16 0.01 °C at offset 21 (`0x7FFF` = no probe), added to v6 without a version change:
-  decoders that read 21 bytes (the deployed postBleData) keep working.
+  decoders that read 21 bytes keep working. postBleData in this repo reads the probe; a byte after
+  it is reserved and left unread. That zip is not uploaded yet (`cloud/README.md`).
 
 ### Live ECG with the Equimetrics app (VPro-compatible BLE)
 
@@ -423,8 +424,9 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
 
 1. **Live data soak test:** leave a session running through the PC gateway and watch for gaps or
    errors (gateway, postBleData logs in CloudWatch, Mongo). Reflash the **receiver dev kit** (its
-   on-demand ECG wait is now 75 s for the 60 s bursts). Then: DynamoDB dedup for several gateways,
-   a commercial gateway + adapter, postBleData memory 256 MB and its own role for production.
+   on-demand ECG wait is now 75 s for the 60 s bursts). DynamoDB dedup is implemented
+   (`cloud/README.md`); create the table, grant the role, and upload the zip before it is live.
+   Then: a commercial gateway + adapter, postBleData memory 256 MB and its own role for production.
 2. **Wi-Fi while charging, next:** ECG upload works (check the recording appears in the app); then
    the upload progress in the charging report (`fileProgress`), the device event log, firmware check
    + remote `setup` (config). Reflash 15B0B4 for the 16-digit ID.

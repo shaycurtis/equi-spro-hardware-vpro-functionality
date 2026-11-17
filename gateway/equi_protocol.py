@@ -9,6 +9,7 @@ Manufacturer Specific Data, company ID 0xFFFF (test ID - replace for production)
   E9 04 ...  telemetry v4 (v3 + heart rate)            - advert
   E9 05 ...  telemetry v5 (1-byte session tag)         - advert
   E9 06 ...  telemetry v6 (v5 + horse position)        - advert; 23 bytes = + probe temperature
+                                                 (any further byte is reserved and not decoded)
   E9 81 ...  identity v1 (session ID, HorseID, clear) - scan response (older firmware)
   E9 82 ...  identity v2 (AES-CCM, 4-byte session s)   - scan response (older firmware)
   E9 83 ...  identity v3 (AES-CCM, 8-byte session ms)  - scan response, needs the fleet key
@@ -197,6 +198,7 @@ def decode(payload: bytes) -> Union[Telemetry, Identity, None]:
             if len(payload) >= 23:   # optional, appended later: older v6 firmware sends 21 bytes
                 ht, = struct.unpack_from("<h", payload, 21)
                 horse_temp = None if ht == 0x7FFF else ht / 100.0
+            # Byte 23, if a sender appends one, is reserved. Leave it unread.
     elif kind in (3, 4) and len(payload) >= 22:
         session, = struct.unpack_from("<I", payload, 5)
         seq, flags = payload[9], payload[10]
@@ -248,6 +250,9 @@ if __name__ == "__main__":
     assert t6p.horse_temp_c == 38.12 and t6p.position == "standing", t6p
     assert decode(bytes([MAGIC, 6]) + p[2:] + bytes([4]) + struct.pack("<h", 0x7FFF)).horse_temp_c is None
     assert decode(bytes([MAGIC, 6]) + p[2:] + bytes([4]) + struct.pack("<h", -125)).horse_temp_c == -1.25
+    # A trailing byte is reserved. It must not change the probe reading.
+    t6x = decode(bytes([MAGIC, 6]) + p[2:] + bytes([4]) + struct.pack("<h", 3812) + bytes([0x24]))
+    assert t6x.horse_temp_c == 38.12 and t6x.position == "standing", t6x
     import os
     set_fleet_key(os.urandom(16))
     hdr = bytes([MAGIC, 0x82, 0x15, 0xB0, 0xB4]) + os.urandom(4)

@@ -41,11 +41,13 @@ def main():
     session = now - 20 * 60 * 1000                       # a session that started 20 min ago
     tag = session & 0xFF
 
-    # telemetry v6: battery 86.5 %, 3.95 V, 23.10 C, 50 %RH, 850 steps, 38 bpm, on battery,
-    # standing now (4), moving + standing during the minute
+    # telemetry v6, 23 bytes: battery 86.5 %, 3.95 V, 23.10 C, 50 %RH, 850 steps, 38 bpm,
+    # on battery, standing now (4), moving + standing during the minute, probe 37.50 C.
+    # The probe is the last int16 (0x7FFF would mean no probe). A console test of the zip
+    # from build.py should show horseTemperature 37.50, not the board's 23.10.
     p = bytes([proto.MAGIC, 6]) + dev + bytes([tag, 42, proto.FLAG_RTC_VALID])
     p += struct.pack("<HHhB", round(86.5 * 256), 3950, 2310, 50) + struct.pack("<I", 850) + bytes([38])
-    p += bytes([4 | (1 << 6) | (1 << 7)])
+    p += bytes([4 | (1 << 6) | (1 << 7)]) + struct.pack("<h", 3750)
     adv = (ad(0x01, b"\x06") + mfg(p)).hex()
 
     # identity v3, encrypted as the firmware does (nonce = device id + 4 random bytes)

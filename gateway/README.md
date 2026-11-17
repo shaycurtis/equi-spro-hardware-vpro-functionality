@@ -36,7 +36,9 @@ Files:
 - `ecg_manager.py`: on-demand ECG via the receiver (request, reassembly, storage).
 - `webapp.py`: JSON API + `static/index.html`.
 - `mqtt_publisher.py`: `--mqtt`: one message per device per burst (all advert copies + the latest
-  identity), topic `equimetrics/ble/<thing>/adv`, the postBleData input format.
+  identity), topic `equimetrics/ble/<thing>/adv`, the postBleData input format. A second gateway's
+  copy of the same burst, and an advert whose scan response arrives in a later message, are
+  handled in the Lambda (`cloud/README.md`).
 
 SQLite tables (`data/telemetry.db`, git-ignored): `readings` (one row per 60 s advert, with
 `device_session`, `horse_id`, `heart_rate`, `position`, `positions_seen`, `horse_temp` (DS18B20 probe, °C)), `device_sessions` (session ID, HorseID, start, last seen),

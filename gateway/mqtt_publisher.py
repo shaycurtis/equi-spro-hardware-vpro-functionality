@@ -6,8 +6,10 @@ format of the postBleData Lambda (cloud/post_ble_data/post_ble_data.py):
     payload {"gatewayId": ..., "items": [{"mac", "rssi", "ts", "adv" | "rsp": "<hex AD structures>"}]}
 
 One message per device per 60 s burst: every copy of the telemetry advert heard in the burst
-(the Lambda keeps the best RSSI) plus the device's latest identity scan response, so the Lambda
-can always attach the session and horse. Sent BURST_SETTLE_S after the burst's first advert.
+(the Lambda keeps the best RSSI of that message) plus the device's latest identity scan response,
+so the Lambda can attach the session and horse. Sent BURST_SETTLE_S after the burst's first advert.
+postBleData also accepts the advert and the scan response as separate messages, and drops a burst
+a second gateway already posted (DynamoDB, see cloud/README.md).
 
 The receiver forwards only our manufacturer-data payload (bytes after the company ID); it is
 wrapped back into a manufacturer-data AD structure, so the Lambda parses it exactly like a

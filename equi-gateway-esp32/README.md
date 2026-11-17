@@ -294,7 +294,8 @@ and see *Security* below.
 - Policy additions: the `$aws/things/<thing>/jobs/*` topics. Plus an IAM role for the pre-signed
   URLs.
 
-**Other follow-ups:** a range test against the PC receiver (-1U board, external antenna); de-dup
-across several gateways in the Lambda (DynamoDB, already in `cloud/README.md`); listen-only
+**Other follow-ups:** a range test against the PC receiver (-1U board, external antenna); dedup
+across several gateways is in postBleData (`cloud/README.md`, DynamoDB) and goes live when that
+zip is uploaded; listen-only
 trusted-gateway receipts for D1 (the device's trust list from the SD card / Wi-Fi, so these
 gateways' scan requests turn it green).
