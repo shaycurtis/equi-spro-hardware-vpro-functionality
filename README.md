@@ -1,7 +1,8 @@
 # Equimetrics VPro firmware (SPRO PCBA)
 
 Custom firmware for the Equimetrics SPRO sensor board (ESP32-S3-WROOM-1-N16R8), a horse-worn
-chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-17** (firmware review fixes; remote settings through AWS IoT, phases 1 and 2).
+chest sensor, plus a PC gateway and dashboard for development. Status as of **2026-11-17, afternoon** (firmware review fixes, including four made with Cursor;
+remote settings through AWS IoT, phases 1 and 2; tested together on 0840E8).
 
 > **Signing keys never leave this PC.** `**/private/` and `*.pem` are git-ignored. All
 > building and signing is local. The **fleet key** (`private/fleet_key.bin`, 16 bytes) is built into the
@@ -108,13 +109,19 @@ chest sensor, plus a PC gateway and dashboard for development. Status as of **20
   `desired`.
 - Each session writes `/sessions/<session>/<type>_<device id>_<chip number>_<session>.edf`, e.g.
   `/sessions/1794211982000/ecg_50787DFFFE15B0B4_999012345678436_1794211982000.edf` (session ID = Unix time in
-  ms, chip `Unknown` without a tag: the VPro platform's naming, whose uploader reads the session from
+  ms, with real milliseconds since 2026-11-17 (before: always `...000`), chip `Unknown` without a tag: the VPro platform's naming, whose uploader reads the session from
   the folder and the other fields from the file name). ECG and IMU are separate files.
 - **App recordings** (automatic ECG off): every `start` from the app writes its own ECG file in the
   session's folder, named after the recording's start time in ms (the app's recording ID):
   `ecg_<device id>_<chip>_<startMs>.edf` (folder = the recording ID if no session has started). Saved when
-  the timer ends (`finished`) or on `stop`, deleted on `discard`, saved on power-off. With automatic
+  the timer ends (`finished`) or on `stop`, deleted on `discard`, saved on power-off. The app sends a
+  duration (300 s seen): a timed recording carries on if the phone disconnects and ends on time. One
+  with no duration is saved and stopped when the app disconnects (nobody is left to send `stop`). The
+  provisioning gesture also closes it first (verified 2026-11-17: 45 s file, then uploaded). With automatic
   ECG on and a session running, the session file already has the ECG: the app gets the live view only.
+- A file with only its header (no records) is deleted at upload time instead of being sent. A file
+  switch at a horse change waits at most 1 s for samples still in a sensor buffer, so one stopped
+  signal no longer stalls every file.
 - Files are **EDF+C, as the VPro firmware writes them** (edflib; checked against a VPro file): EDF+
   patient `<chip|Unknown> X X X`, recording `Startdate dd-MMM-yyyy X X X`, plus an `EDF Annotations`
   signal (60 samples) whose time-keeping TAL gives each record's onset after the header's start second
@@ -289,17 +296,19 @@ python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default-reset --afte
   it is missing). Boards done so far: `15B0B4`, `236B2C`, `0840E8` (backend ID
   `DCB4D9FFFE0840E8`, known to the dev backend: its IMU upload on 2026-11-17 was accepted with an
   organisation; Wi-Fi provisioned 2026-11-16; AWS IoT thing `equi-sensor-DCB4D9FFFE0840E8`; the
-  only board on the current build with the review fixes and remote settings, the other two
-  still need flashing).
+  only board on the current build (firmware as of commit `c6f45f0`) with the review fixes and remote
+  settings; the other two still need flashing, and will get their AWS identity on their first
+  charge on Wi-Fi).
 - Check the port first: `esptool -p COM3 --no-stub get-security-info` must say *Secure Boot: Enabled*.
 - Back to the original SPro app (in ota_0): write `equi-sensordevice-blink/recovery/otadata_boot_ota0.bin`
   encrypted to 0x320000 (same esptool options).
 
-**Receiver dev kit (COM4):** plain chip, no security. **Since 2026-11-11 it runs the ESP32 gateway**
+**Receiver dev kit (COM4 earlier, COM7 on 2026-11-17):** plain chip, no security. **Since 2026-11-11 it runs the ESP32 gateway**
 (`equi-gateway-esp32/`, WROOM-2 build, see its README). Back to the PC receiver: `cd gateway-receiver; idf.py -p COM4 flash`.
 Check `get-security-info` says *Secure Boot: Disabled* first. Never flash VPro images there.
 
-COM numbers can change: identify boards by `get-security-info` (SPRO CP210x serial `0001`).
+COM numbers can change: identify boards by `get-security-info` (SPRO CP210x serial `0001`; the gateway
+kit's CP210x has a long serial number).
 
 ## Run the gateway and dashboard
 
@@ -477,13 +486,16 @@ Open http://localhost:8080 for device cards, sessions, charts and ECG capture. D
    test), which reaches the backend; accepted for now. VPro's DC lead-off (100 nA, +/-300 mV, 25 MOhm
    bias) has wrongly reported leads off on a horse before, so it is not a quick fix.
 9. Tidy-ups: quieten the per-burst scanner log; magnetometer hard-iron calibration in analysis.
-10. **Firmware review (2026-11-16), still to do:** flash 15B0B4 and 236B2C with the fixed build;
-   with SD logging on, check that the provisioning gesture closes the files and that a resumed
-   session writes new files. Review findings not fixed yet: a
-   new-horse file switch stalls if one signal has stopped; an app recording with no duration never
-   ends if the app goes away; header-only files (no records) are uploaded; the session tag has
-   only 32 values (ms IDs are multiples of 1000); no crash counter / reset reason in the telemetry;
-   NVS is not encrypted and the gateway ECG service needs no pairing (production).
+10. **Firmware review, still to do:** flash 15B0B4 and 236B2C with the current build. All review
+   findings are now fixed (four of them on 2026-11-17, through Cursor: file switch, open-ended app
+   recordings, header-only uploads, session tag). Verified on 0840E8: session IDs with real ms; the
+   provisioning gesture closing an open app recording; its upload. Not exercised: a horse change
+   (needs a second tag), session ECG + IMU files together, a stopped sensor during a switch, a real
+   header-only file, an open-ended app recording (the app always sent a duration), the crash
+   resume with SD logging on. The app connected and dropped four times (`0x213`, by the phone)
+   before it first paired with 0840E8: watch whether that repeats. Left for later: crash counter /
+   reset reason (remote settings plan, phase 3; the spare advert byte stays reserved); NVS
+   encryption and pairing for the gateway ECG service (production).
 11. Production items: SIG company ID, off-the-shelf listen-only gateway (active scan + scan
    responses), per-device keys and BLE passkey, AWS backend, test-lab check that +15 dBm stays
    within the SPRO certification.
