@@ -301,7 +301,12 @@ python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default-reset --afte
   charge on Wi-Fi).
 - Check the port first: `esptool -p COM3 --no-stub get-security-info` must say *Secure Boot: Enabled*.
 - Back to the original SPro app (in ota_0): write `equi-sensordevice-blink/recovery/otadata_boot_ota0.bin`
-  encrypted to 0x320000 (same esptool options).
+  encrypted to 0x320000 (same esptool options). Only while ota_0 still holds it: a board's first
+  firmware update over the air (AWS IoT Jobs) overwrites it.
+- **A board that has updated over the air** runs from ota_0 or ota_1, and the bootloader ignores
+  the factory slot, so a cable flash at 0x20000 alone would not run. Add
+  `0x320000 ota_data_initial.bin` (from `build\`) to the same encrypted `write-flash` command, as for
+  a first VPro flash. NVS is not touched.
 
 **Receiver dev kit (COM4 earlier, COM7 on 2026-11-17):** plain chip, no security. **Since 2026-11-11 it runs the ESP32 gateway**
 (`equi-gateway-esp32/`, WROOM-2 build, see its README). Back to the PC receiver: `cd gateway-receiver; idf.py -p COM4 flash`.

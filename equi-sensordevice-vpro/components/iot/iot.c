@@ -577,7 +577,24 @@ static void confirm_new_image(void)
 {
     esp_ota_img_states_t state;
     const esp_partition_t *running = esp_ota_get_running_partition();
-    if (esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+    esp_err_t got = esp_ota_get_state_partition(running, &state);
+    /* "pending verify" right after an update proves the bootloader has rollback; "new" means it
+     * does not (the update still runs, but a broken image would not roll back by itself).
+     * The factory slot has no state (ESP_ERR_NOT_SUPPORTED). */
+    static const char *const names[] = { "new", "pending verify", "valid", "invalid", "aborted" };
+    const char *name = "none";
+    if (got == ESP_OK) {
+        switch (state) {
+        case ESP_OTA_IMG_NEW:            name = names[0]; break;
+        case ESP_OTA_IMG_PENDING_VERIFY: name = names[1]; break;
+        case ESP_OTA_IMG_VALID:          name = names[2]; break;
+        case ESP_OTA_IMG_INVALID:        name = names[3]; break;
+        case ESP_OTA_IMG_ABORTED:        name = names[4]; break;
+        default:                         name = "undefined"; break;
+        }
+    }
+    ESP_LOGI(TAG, "running from %s, OTA state %s", running->label, name);
+    if (got == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
         esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
         ESP_LOGW(TAG, "new firmware %s confirmed (reached AWS IoT): %s", running_version(), esp_err_to_name(err));
     }

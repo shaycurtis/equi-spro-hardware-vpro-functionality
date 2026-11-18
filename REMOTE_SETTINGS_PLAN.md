@@ -136,13 +136,16 @@ fresh pre-signed download link made when the device fetches the job).
 - **Status (parked 2026-11-17):** code written and built (signed with spro), not yet flashed or
   tested; the AWS side (bucket, presign role, `sensors-bench`, job) not yet set up.
 - **To decide / do before the first test:**
-  1. Accept that the first update overwrites the original SPro app in `ota_0`, or keep a copy of
-     its image first (secure download mode will not let us read it back from the board).
+  1. DONE 2026-11-18: the user accepts that the first update overwrites the original SPro app in
+     `ota_0` (left over from the original firmware's OTA; it can be reflashed if ever needed).
+  - AWS side DONE 2026-11-18 (user): bucket `equimetrics-sensor-firmware-dev`, role
+    `equimetrics-iot-jobs-presign` (inline `sensor-firmware-read` only; the console's three managed
+    IoT policies removed), static group `sensors-bench` with `equi-sensor-DCB4D9FFFE0840E8`.
   2. Cable flashing after an update: once otadata points at `ota_0`/`ota_1`, the bootloader ignores
-     `factory`, so an app flashed to 0x20000 does not run. Fix: write 0x2000 bytes of 0xFF over
-     `otadata` (0x320000) with esptool (plain write, allowed in secure download mode; NVS untouched),
-     then factory boots again. Add this as a README step.
-  3. Add a boot log line printing the running image's OTA state: `pending verify` after the first
+     `factory`, so an app flashed to 0x20000 does not run. Fix: also write `build\ota_data_initial.bin`
+     encrypted at 0x320000 (otadata is encrypted on this board), as for a first VPro flash; NVS
+     untouched. DONE: README "Rules for the SPRO board".
+  3. DONE: each round logs `running from <slot>, OTA state <state>`: `pending verify` after the first
      update proves the 5.2.1 bootloader has rollback; `new` / `undefined` means it does not (updates
      still work, but a broken image would not roll back by itself). IDF 6.1 for the app does not
      change this: the bootloader decides, and the otadata format is the same in 5.2.1 and 6.1.
