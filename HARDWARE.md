@@ -1,6 +1,6 @@
 # SPRO PCBA – hardware reference (from Altium SPRO.PcbDoc netlist + schematics)
 
-The Altium files themselves (`SPRO_PCBA/`) are not in the repository; see README, "Not in this repository".
+The Altium files themselves (`reference/SPRO_PCBA/`, git-ignored) are not in the repository; see README, "Not in this repository".
 
 MCU: **ESP32-S3-WROOM-1-N16R8** (U1): 16 MB quad flash, 8 MB octal PSRAM (GPIO35-37 used internally, not routed).
 
@@ -73,8 +73,9 @@ MCU: **ESP32-S3-WROOM-1-N16R8** (U1): 16 MB quad flash, 8 MB octal PSRAM (GPIO35
 - WS2812B-2020 run from 3.3 V (below their 3.7 V spec); keep brightness modest.
 - Programming/console: CP2102N on magnetic connector D1_P/D1_N, with classic DTR/RTS auto-reset (Q6/Q7).
 
-## Firmware config notes (helloworld sdkconfig, ESP-IDF 5.2.1)
-- Secure Boot V2 (RSA), signing key used for these boards: `private/spro/fw_signing_key.pem` (helloworld sdkconfig defaulted to `vpro`).
+## Firmware config notes (helloworld sdkconfig, ESP-IDF 5.2.1; `reference/spro-helloworld/`, not in git)
+- Secure Boot V2 (RSA), signing key used for these boards: `private/spro/fw_signing_key.pem` in the repository root (helloworld sdkconfig defaulted to `vpro`).
+- The bootloader on the boards was NOT built from this sdkconfig: this one has app rollback on, the boards' bootloader has it off (found 2026-11-18).
 - Flash encryption enabled, **development mode**, AES-128. Key is generated on-chip in eFuse; not in this folder.
 - Partition table at 0x10000: nvs, phy_init, factory 3M, otadata, ota_0 3M, ota_1 3M.
 - Console UART0 @115200, secondary console on USB-Serial-JTAG (GPIO19/20 are I2C on this board, so this should be disabled for the real firmware).

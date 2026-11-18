@@ -149,6 +149,15 @@ fresh pre-signed download link made when the device fetches the job).
      update proves the 5.2.1 bootloader has rollback; `new` / `undefined` means it does not (updates
      still work, but a broken image would not roll back by itself). IDF 6.1 for the app does not
      change this: the bootloader decides, and the otadata format is the same in 5.2.1 and 6.1.
+- **First test, 2026-11-18, PASSED on 0840E8:** cable-flashed `0.1.0-g25919da` (factory); job
+  `sensor-fw-0-2-0-bench` (snapshot, group `sensors-bench`, pre-signed link) picked up at the
+  next round, IN_PROGRESS, 1.6 MB written to `ota_0` in 71 s over Wi-Fi at -81 dBm, restart, first
+  round on `0.2.0`: charging report and `reported.fw` show `0.2.0`, job SUCCEEDED.
+  **Finding:** after the update the log said `running from ota_0, OTA state new`, not `pending
+  verify`, so the board's IDF 5.2.1 bootloader was built WITHOUT rollback. Updates work, but a
+  broken image is not rolled back by the bootloader. It falls back to another slot only when an
+  image fails to load (bad signature, corrupt), not when the app crashes or cannot reach AWS.
+  The bootloader cannot be replaced (secure boot rule: never flash a bootloader).
 - **Test plan:** commit, flash that build by cable (version `0.1.0-g<hash>`); tag the same commit
   `sensor-v0.2.0` and build (version `0.2.0`); upload to the bucket; create a job for
   `sensors-bench` (0840E8 only); watch the next charging round update, restart, confirm, and the

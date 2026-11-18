@@ -13,7 +13,8 @@ remote settings through AWS IoT, phases 1 and 2; tested together on 0840E8).
 | Path | What it is |
 |---|---|
 | `HARDWARE.md` | Pin map, connector pinout, parts, power tree and hardware notes extracted from the Altium files (not in the repository, see below) |
-| `equi-sensordevice-helloworld-fimware/` | Original IDF 5.2.1 reference project. **`private/` holds the signing keys** |
+| `private/` | Git-ignored secrets, see below. **`private/spro/fw_signing_key.pem` signs everything for the SPRO boards** |
+| `reference/` | Git-ignored reference designs, read-only, see below |
 | `equi-sensordevice-blink/` | IDF 6.1 bring-up test (+ `recovery/otadata_boot_ota0.bin`, see below) |
 | `equi-sensordevice-vpro/` | **The VPro device firmware** (secure boot + flash encryption) |
 | `gateway-receiver/` | Firmware for a plain ESP32-S3 dev kit used as the BLE gateway radio |
@@ -25,12 +26,16 @@ remote settings through AWS IoT, phases 1 and 2; tested together on 0840E8).
 ### Not in this repository
 
 - **`private/` folders** (git-ignored, never committed): the secure boot signing keys
-  (`equi-sensordevice-helloworld-fimware/private/`), the fleet key, the data API settings
-  (`private/api_env.h`) and the AWS IoT certificates. They stay on the build PC.
-- **SPRO hardware design files** (`SPRO_PCBA/`, Altium schematics, PCB, BOM; ~23 MB, git-ignored):
-  the source of truth for the hardware, kept with the hardware design. Everything the firmware
-  needs from them is in `HARDWARE.md` (pins, nets, connector, parts). Copy the folder back into
-  the repository root if the netlist needs to be read again.
+  (`private/spro/` for the SPRO boards, `private/vpro/` unused), the fleet key, the data API
+  settings (`private/api_env.h`), the AWS IoT certificates and the release images
+  (`private/releases/`). They stay on the build PC.
+- **`reference/`** (git-ignored, on disk only; read, never built or changed):
+  - `reference/spro-helloworld/`: the original IDF 5.2.1 SPRO reference project (was
+    `equi-sensordevice-helloworld-fimware/`, in git until 2026-11-18).
+  - `reference/SPRO_PCBA/`: SPRO hardware design files (Altium schematics, PCB, BOM; ~23 MB), the
+    source of truth for the hardware. Everything the firmware needs is in `HARDWARE.md`.
+  - The original SPRO production firmware and its `sdkconfig` go here too: they tell how the
+    bootloader on the boards was built (it has no app rollback, found 2026-11-18).
 - **The original VPro firmware** (`equi-sensordevice-platform`, ESP-IDF 5.2.1, LoRa): this
   firmware was built with it as the reference (BLE services, backend API, EDF+ file format,
   sessions, charging telemetry), studied read-only; no code was copied. Get it from the
@@ -277,7 +282,7 @@ Activate IDF 6.1 in PowerShell: `. C:\Espressif\tools\Microsoft.v6.1.PowerShell_
 ```powershell
 cd equi-sensordevice-vpro
 idf.py build
-espsecure verify-signature --version 2 --keyfile ..\equi-sensordevice-helloworld-fimware\private\spro\fw_signing_key.pem build\equi-sensordevice-vpro.bin
+espsecure verify-signature --version 2 --keyfile ..\private\spro\fw_signing_key.pem build\equi-sensordevice-vpro.bin
 cd build
 python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default-reset --after no-reset --no-stub write-flash --flash-mode dio --flash-freq 80m --flash-size 16MB --encrypt 0x20000 equi-sensordevice-vpro.bin
 ```
